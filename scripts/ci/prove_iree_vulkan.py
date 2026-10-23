@@ -31,6 +31,7 @@ def cases():
         LayerNorm2d,
         RMSNorm,
         SwiGLU,
+        SwinBlock2D,
     )
 
     return {
@@ -60,7 +61,57 @@ def cases():
             lambda: FullAttention3D(dim=16, num_heads=2),
             (1, 2, 2, 2, 16),
         ),
+        # Real SwinBlock2D wrappers (not a substitute attention network).
+        # Irregular sizes exercise masking of shifted, padded edge tokens.
+        "swin2d-shift-padded": (
+            lambda: SwinBlock2D(dim=16, num_heads=2, window_size=4,
+                                shift=(2, 2)),
+            (1, 7, 9, 16),
+        ),
+        "swin2d-shift-batched": (
+            lambda: SwinBlock2D(dim=16, num_heads=2, window_size=4,
+                                shift=(2, 0)),
+            (2, 8, 8, 16),
+        ),
+        "swin2d-shift-column": (
+            lambda: SwinBlock2D(dim=16, num_heads=2, window_size=4,
+                                shift=(0, 2)),
+            (1, 5, 7, 16),
+        ),
     }
+
+
+class GeometryMaskSwin2DAttention(torch.nn.Module):
+    """Import-time legalization of an original shifted Swin attention module.
+
+    The source block retains its exact forward, weights, shifts and skips.
+    Its own cached grouping represents a shape-constant attention mask;
+    express it as a dense bool tensor for graph import instead of exporting
+    Python loops, CPU region IDs, and advanced indexed scatter.
+    """
+
+    def __init__(self, original, shape, window_size, shift):
+        super().__init__()
+        from corridorkey.blocks import _shifted_attention_mask_2d
+
+        self.original = original
+        _, height, width, _ = shape
+        padded_height = ((height + window_size - 1) // window_size) * window_size
+        padded_width = ((width + window_size - 1) // window_size) * window_size
+        mask = _shifted_attention_mask_2d(
+            height, width, padded_height, padded_width,
+            window_size, shift[0], shift[1], torch.device("cpu"),
+        )
+        if mask is None:
+            raise ValueError("Shifted block requires a nonempty region mask")
+        if not mask.any(dim=-1).all():
+            raise ValueError("Shifted mask has a fully masked query")
+        self.register_buffer("allowed", mask, persistent=False)
+
+    def forward(self, x, attn_mask=None, region_groups=None, region_ids=None):
+        if region_groups is None:
+            return self.original(x, attn_mask=attn_mask, region_ids=region_ids)
+        return self.original(x, attn_mask=self.allowed)
 
 
 class ChannelLastResult(torch.nn.Module):
@@ -92,11 +143,29 @@ def prepare(name: str):
     if name.startswith("rmsnorm"):
         with torch.no_grad():
             model.weight.copy_(torch.linspace(0.6, 1.4, 16))
+    if name.startswith("swin2d-shift"):
+        with torch.no_grad():
+            torch.nn.init.normal_(model.attn.proj.weight, std=0.04)
+            torch.nn.init.normal_(model.attn.proj.bias, std=0.02)
+            torch.nn.init.normal_(model.mlp.w_down.weight, std=0.04)
+            torch.nn.init.normal_(model.mlp.w_down.bias, std=0.02)
     sample = torch.randn(shape, dtype=torch.float32)
     with torch.inference_mode():
         expected = model(sample).detach().numpy()
     if not np.isfinite(expected).all() or np.max(np.abs(expected)) == 0:
         raise AssertionError(f"{name}: invalid or trivial reference")
+    if name.startswith("swin2d-shift"):
+        source_attention = model.attn
+        model.attn = GeometryMaskSwin2DAttention(
+            source_attention, shape, model.window_size,
+            (model.shift_h, model.shift_w),
+        )
+        with torch.inference_mode():
+            legalized_reference = model(sample).detach().numpy()
+        np.testing.assert_allclose(
+            legalized_reference, expected, atol=1.0e-5, rtol=1.0e-5,
+            err_msg="Dense geometry mask must reproduce original grouped SDPA",
+        )
     if name == "rmsnorm2d":
         lowered = ChannelLastResult(model).eval()
         with torch.inference_mode():
@@ -150,12 +219,20 @@ def _sdpa_inference_math(
     permits Vulkan compilation without changing any source model or weights.
     Other SDPA modes must be legalized independently rather than approximated.
     """
-    if attn_mask is not None or dropout_p != 0.0 or is_causal or enable_gqa:
+    if dropout_p != 0.0 or is_causal or enable_gqa:
         raise NotImplementedError(
-            "Only unmasked, non-causal, dropout-free inference SDPA is legalized"
+            "Inference SDPA legalization supports optional masks, "
+            "but not dropout, causal attention or grouped-query expansion"
         )
     factor = query.shape[-1] ** -0.5 if scale is None else scale
     scores = torch.matmul(query, key.transpose(-2, -1)) * factor
+    if attn_mask is not None:
+        if attn_mask.dtype == torch.bool:
+            # PyTorch SDPA bool masks mean True=allowed. Every mask row
+            # must have at least one valid key; checked during preparation.
+            scores = scores.masked_fill(~attn_mask, float("-inf"))
+        else:
+            scores = scores + attn_mask
     probabilities = torch.softmax(scores, dim=-1)
     return torch.matmul(probabilities, value)
 
