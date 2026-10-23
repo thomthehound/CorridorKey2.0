@@ -22,7 +22,7 @@ import numpy as np
 import torch
 
 import iree.turbine.aot as aot
-from iree_vulkan_legalizations import grouped_sdpa_contiguous, headwise_gate_contiguous
+from iree_vulkan_legalizations import grouped_sdpa_masked
 
 
 def cases():
@@ -418,25 +418,22 @@ def run_case(name: str, directory: Path, run_vulkan: bool, target: str) -> dict:
 
         grouped_case = name.startswith("swin2d-grouped")
         original_sdpa = blocks._sdpa_with_region_groups
-        original_gate = blocks.HeadwiseAttentionGate.forward
         setattr(blocks, cache_name, fixed_groups)
         if grouped_case:
-            blocks._sdpa_with_region_groups = grouped_sdpa_contiguous
-            blocks.HeadwiseAttentionGate.forward = headwise_gate_contiguous
+            blocks._sdpa_with_region_groups = grouped_sdpa_masked
         try:
             if grouped_case:
                 with torch.inference_mode():
                     lowered_reference = model(sample).detach().numpy()
                 np.testing.assert_allclose(
                     lowered_reference, expected, atol=1e-6, rtol=1e-6,
-                    err_msg="Grouped index-copy legalization differs from source",
+                    err_msg="Region mask legalization differs from source",
                 )
-                status["legalization"] = "packed grouped-attention gather"
+                status["legalization"] = "exact static region mask"
             exported = torch.export.export(model, (sample,), strict=True)
         finally:
             setattr(blocks, cache_name, source_groups)
             blocks._sdpa_with_region_groups = original_sdpa
-            blocks.HeadwiseAttentionGate.forward = original_gate
     else:
         exported = torch.export.export(model, (sample,), strict=True)
     exported = exported.run_decompositions({
