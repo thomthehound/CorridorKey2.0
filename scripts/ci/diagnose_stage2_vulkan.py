@@ -31,7 +31,7 @@ SITES = (
     ("patchify", "patch_1", (1, 32, 2, 2)),
     ("pre_block_0", "pre_blocks.0", (1, 2, 2, 48)),
     ("pre_block_3", "pre_blocks.3", (1, 2, 2, 48)),
-    ("pre_block_7", "pre_blocks.7", (1, 2, 2, 48)),
+    ("pre_block_5", "pre_blocks.5", (1, 2, 2, 48)),
     ("final_block_0", "final_blocks.0", (1, 2, 2, 48)),
     ("final_block_1", "final_blocks.1", (1, 2, 2, 48)),
     ("depatchify", "depatchify", (1, 4, 32, 32)),
