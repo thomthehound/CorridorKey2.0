@@ -120,3 +120,11 @@ Vulkan/SPIR-V is the **GPU** target, not a portable NPU driver. The shared MLIR 
 3. Preserve intermediate reference tensors at graph boundaries and small subgraphs, including temporal and HDR cases.
 4. Execute complete imported graph partitions on Vulkan, systematically legalizing unsupported operations in reusable compiler passes.
 5. Integrate the original temporal scheduler semantics and prove full-clip native GPU correctness before optimization.
+
+## Continuous integration: Vulkan compiler proof
+
+The `.github/workflows/vulkan-import-proof.yml` workflow tests original source modules in `corridorkey.blocks` with CPU-only PyTorch as a conversion/reference dependency. It imports the real RMS normalization, SwiGLU, full-spatial attention, and full-temporal attention implementations through IREE Turbine, compiles each to `vulkan-spirv`, and retains exported MLIR, VMFB and diagnostics.
+
+Ubuntu 24.04 also runs the compiled binaries with Mesa lavapipe and compares their outputs with original PyTorch evaluation using nontrivial deterministic initialization. Windows builds the same Vulkan graphs without requiring Vulkan hardware. A failed graph, compiler, or numerical test fails the workflow. The test never interprets CPU execution of neural operators as Vulkan success.
+
+These tests establish **operator/subgraph compiler feasibility only**. Randomly initialized instances and a software Vulkan device do not prove full checkpoint loading, complete Stage 1/Stage 2 export, active foundation model compatibility, AMD driver execution, final matte/foreground numerical equivalence, or production performance. Those remain required milestones and must receive their own concrete checkpoint-backed and GPU-backed CI gates rather than being inferred from this proof.
