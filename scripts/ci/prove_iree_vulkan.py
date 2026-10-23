@@ -300,7 +300,34 @@ def run_case(name: str, directory: Path, run_vulkan: bool, target: str) -> dict:
                                 else "standard import legalization")}
     model, sample, expected = prepare(name)
     np.save(directory / "reference.npy", expected)
-    exported = torch.export.export(model, (sample,), strict=True)
+    if name.startswith("swin2d-shift"):
+        # The source calls a Python-only geometry cache during forward.
+        # Specialize that call to its already-evaluated, source-derived
+        # constant for this exact shape profile while preserving the rest
+        # of the upstream block's forward.
+        import corridorkey.blocks as blocks
+
+        source_groups = blocks._shifted_region_groups_2d_cached
+        _, height, width, _ = sample.shape
+        size = model.window_size
+        height_pad = ((height + size - 1) // size) * size
+        width_pad = ((width + size - 1) // size) * size
+        signature = (height, width, height_pad, width_pad,
+                     size, model.shift_h, model.shift_w)
+        groups = source_groups(*signature)
+
+        def fixed_groups(*args):
+            if args != signature:
+                raise ValueError("Unexpected shifted-window export shape")
+            return groups
+
+        blocks._shifted_region_groups_2d_cached = fixed_groups
+        try:
+            exported = torch.export.export(model, (sample,), strict=True)
+        finally:
+            blocks._shifted_region_groups_2d_cached = source_groups
+    else:
+        exported = torch.export.export(model, (sample,), strict=True)
     exported = exported.run_decompositions({
         torch.ops.aten.scaled_dot_product_attention.default: _sdpa_inference_math,
         torch.ops.aten.rms_norm.default: _rms_norm_inference_math,
