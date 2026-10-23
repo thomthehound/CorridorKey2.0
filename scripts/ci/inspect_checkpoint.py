@@ -29,6 +29,27 @@ def model_constructor_parameters(source: Path) -> set[str]:
     raise ValueError(f"Could not locate CorridorKeyV3 constructor in {source}")
 
 
+def model_constructor_defaults(source: Path) -> dict:
+    """Resolve source constructor defaults without importing foundation models."""
+    root = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    for node in root.body:
+        if not isinstance(node, ast.ClassDef) or node.name != "CorridorKeyV3":
+            continue
+        for member in node.body:
+            if not isinstance(member, ast.FunctionDef) or member.name != "__init__":
+                continue
+            params = member.args.posonlyargs + member.args.args
+            defaults = member.args.defaults
+            first = len(params) - len(defaults)
+            if first != 1 or params[0].arg != "self":
+                raise ValueError("Unexpected CorridorKeyV3 constructor signature")
+            return {
+                arg.arg: ast.literal_eval(value)
+                for arg, value in zip(params[first:], defaults)
+            }
+    raise ValueError(f"CorridorKeyV3.__init__ not found in {source}")
+
+
 def inspect_checkpoint(path: Path, model_source: Path) -> dict:
     with path.open("rb") as stream:
         header_size_raw = stream.read(8)
