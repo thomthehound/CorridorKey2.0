@@ -125,7 +125,7 @@ Vulkan/SPIR-V is the **GPU** target, not a portable NPU driver. The shared MLIR 
 
 The `.github/workflows/vulkan-import-proof.yml` workflow imports actual source modules from `corridorkey.blocks` using isolated CPU-side PyTorch, compiles the graphs to `vulkan-spirv` with IREE, and preserves MLIR, compiled VMFB and structured reference-output artifacts. Windows checks RDNA1-targeted compilation; Ubuntu 24.04 executes through Mesa llvmpipe and numerically compares device outputs to the unchanged source reference. This validates the compilation and GPU execution *semantics* for exercised graphs; it does not constitute an AMD hardware performance test.
 
-The proof currently exercises twenty configurations:
+The proof currently exercises twenty-two configurations:
 - RMSNorm with channel-first, channel-last and small NCHW output shapes
 - SwiGLU
 - Full-spatial and full-spatiotemporal attention
@@ -134,6 +134,7 @@ The proof currently exercises twenty configurations:
 - Full-spatial, CSwin, and shifted-Swin blocks at the reduced Stage 2 token layout
 - Native patchification and depatchification, each with non-overlapping and overlapping convolution kernels
 - Two source-derived grouped Swin-2D region-mask configurations, including a small degenerate window and a batched padded profile
+- Two Stage 1-shaped RMSNorm configurations covering high-rank token tensors and sixteen-dimensional head normalization
 
 The source-derived 2D shifted-region cache uses CPU indexing and grouped scatter unsuitable for static graph capture. The importer specializes shape-dependent cached groups, then exposes them as a constant boolean mask on the existing Swin attention module. It numerically verifies the legalized module before exporting it. This is a proof of correctness for modest attention windows; dense quadratic masks are **not** the production strategy for long temporal windows. The 3D proof instead retains the original grouped gather/scatter implementation and specializes only the geometry cache; both compilation and software-Vulkan numerical execution succeed on the tested shapes.
 
@@ -192,6 +193,8 @@ The real checkpoint has **not yet been run through this gate**. Trained-weight c
 
 `scripts/ci/prove_stage1_vulkan.py` now instantiates the actual `Stage1` class and feeds two frames of RGB, subject hint/quality, and the documented pre-normalized MoGe feature interface into the full stage-one forward path. This avoids instantiating foundation networks during the import proof without substituting another Stage 1 architecture. The exercised path includes RGB/hint patchification, the /16 encoder, /64 temporal body, /16 intermediate refinement, /16 decoder and the source baton/auxiliary output heads. The probe deliberately uses reduced channel widths, disabled checkpointing and no recurrent sites; these are explicit profile settings, not claims of compatibility with trained production topology.
 
-The export step compares the source `Stage1` output with the fully decomposed exported CPU graph using the same sample inputs and unchanged numerical tolerance. The first integrated two-frame export **passed the CPU differential gate**, exposing an IREE Vulkan code-generation error while compiling a 12-channel attention-head RMSNorm on the llvmpipe target. A 16-channel-head profile is under validation to distinguish a vectorization problem from general Stage 1 operator support. The Vulkan runtime gate remains mandatory before representing Stage 1 as numerically validated.
+The export step compares the source `Stage1` output with the fully decomposed exported CPU graph using the same sample inputs and unchanged numerical tolerances. Its first two-frame export passed the CPU gate but a direct high-rank RMSNorm graph triggered an IREE `arith.addf` type error under Vulkan compilation. Flattening the leading dimensions before invoking the **original RMSNorm module** (then reshaping the output) preserves last-axis normalization, epsilon, and learned weights. An independent CPU equivalence check enforces the source semantics before export. That legalized graph now **compiles for RDNA1 on Windows and numerically executes on Linux software Vulkan**, with both baton and auxiliary-head outputs checked. The standalone 22-case Vulkan proof is also green on both platforms.
+
+A stronger regression fixture additionally activates the source's initially zeroed mid-stage detour projections, /64-to-/16 upsample contribution, and learned late skip. These are fixture weights, not a production model modification; they prevent unused residual pathways from masking compiler defects. That enhanced test is under CI validation.
 
 Still required separately: actual checkpoint Stage 1 configuration and tensor loading, RVM and MoGe/C-RADIO feature integration, recurrent memory-state inputs/outputs, time-stride and streaming/Hann-window scheduling, high-resolution padded shapes, and practical AMD execution/performance. Validation on the reduced source model cannot replace any of those gates.
