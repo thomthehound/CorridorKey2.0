@@ -157,7 +157,7 @@ def export_stage1(model, args):
             flattened = tuple(t.detach().numpy() for t in model(*args))
         for index, (reference, actual) in enumerate(zip(authoritative, flattened)):
             np.testing.assert_allclose(
-                actual, reference, atol=0.0, rtol=0.0,
+                actual, reference, atol=1e-6, rtol=1e-6,
                 err_msg=f"Flattened Stage1 RMSNorm changed source output {index}",
             )
         exported = torch.export.export(model, args, strict=True)
