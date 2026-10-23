@@ -29,6 +29,17 @@ from prove_stage2_vulkan import create_stage2, export_stage2
 # All outputs are structural tensor boundaries, not independent test models.
 SITES = (
     ("patchify", "patch_1", (1, 32, 2, 2)),
+    # A block's final residual addition can occur *outside* its tagged
+    # submodule operations. Inspect the input to the next block's first
+    # normalization instead: this is the actual inter-block tensor.
+    ("input_pre_0", "input:pre_blocks.0.norm1", (1, 2, 2, 48)),
+    ("input_pre_1", "input:pre_blocks.1.norm1", (1, 2, 2, 48)),
+    ("input_pre_2", "input:pre_blocks.2.norm1", (1, 2, 2, 48)),
+    ("input_pre_3", "input:pre_blocks.3.norm1", (1, 2, 2, 48)),
+    ("input_pre_4", "input:pre_blocks.4.norm1", (1, 2, 2, 48)),
+    ("input_pre_5", "input:pre_blocks.5.norm1", (1, 2, 2, 48)),
+    ("input_final_0", "input:final_blocks.0.norm1", (1, 2, 2, 48)),
+    ("input_final_1", "input:final_blocks.1.norm1", (1, 2, 2, 48)),
     ("pre_block_0", "pre_blocks.0", (1, 2, 2, 48)),
     ("pre_block_1", "pre_blocks.1", (1, 2, 2, 48)),
     ("pre_block_2_norm1", "pre_blocks.2.norm1", (1, 2, 2, 48)),
@@ -57,14 +68,28 @@ def expose_intermediates(exported):
 
     for name, path, shape in SITES:
         candidates = []
+        is_block_input = path.startswith("input:")
+        if is_block_input:
+            path = path[len("input:"):]
         for node in gm.graph.nodes:
             if node.op != "call_function":
                 continue
-            value = node.meta.get("val")
+            if not any(path in p for p in _stack_paths(node)):
+                continue
+            if is_block_input:
+                # The first RMSNorm op is square(x). Its operand x is the
+                # exact tensor passed into the block, after prior residuals.
+                if "square" not in str(node.target):
+                    continue
+                candidate = node.args[0]
+                if not isinstance(candidate, torch.fx.Node):
+                    continue
+            else:
+                candidate = node
+            value = candidate.meta.get("val")
             if not hasattr(value, "shape") or tuple(value.shape) != shape:
                 continue
-            if any(path in p for p in _stack_paths(node)):
-                candidates.append(node)
+            candidates.append(candidate)
         if not candidates:
             available = [
                 (node.name, tuple(node.meta["val"].shape), _stack_paths(node))
