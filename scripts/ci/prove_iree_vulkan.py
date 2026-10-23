@@ -22,6 +22,7 @@ import numpy as np
 import torch
 
 import iree.turbine.aot as aot
+from iree_vulkan_legalizations import grouped_sdpa_contiguous
 
 
 def cases():
@@ -109,6 +110,18 @@ def cases():
             lambda: SwinBlock2D(dim=48, num_heads=4, window_size=4,
                                 shift=(2, 2)),
             (1, 2, 2, 48),
+        ),
+        # Unlike the dense-mask Swin proof, these run the original grouped
+        # gather/scatter path with an exact contiguous index-copy lowering.
+        "swin2d-grouped-stage2": (
+            lambda: SwinBlock2D(dim=48, num_heads=4, window_size=4,
+                                shift=(2, 2)),
+            (1, 2, 2, 48),
+        ),
+        "swin2d-grouped-batched": (
+            lambda: SwinBlock2D(dim=16, num_heads=2, window_size=4,
+                                shift=(2, 0)),
+            (2, 5, 7, 16),
         ),
         # Original Stage2 image-to-token and token-to-image operators.
         # Test nontrivial weights, not the zero-initialized image head.
@@ -214,7 +227,7 @@ def prepare(name: str):
     if name.startswith("rmsnorm"):
         with torch.no_grad():
             model.weight.copy_(torch.linspace(0.6, 1.4, 16))
-    if (name.startswith(("swin2d-shift", "swin3d-shift"))
+    if (name.startswith(("swin2d-shift", "swin2d-grouped", "swin3d-shift"))
             or name in ("fullspatial2d-stage2", "cswin2d-stage2")):
         with torch.no_grad():
             torch.nn.init.normal_(model.attn.proj.weight, std=0.04)
@@ -372,7 +385,7 @@ def run_case(name: str, directory: Path, run_vulkan: bool, target: str) -> dict:
                                 else "standard import legalization")}
     model, sample, expected = prepare(name)
     np.save(directory / "reference.npy", expected)
-    if name.startswith(("swin2d-shift", "swin3d-shift")):
+    if name.startswith(("swin2d-shift", "swin2d-grouped", "swin3d-shift")):
         # Source Python region caches are shape-constant but use nonzero +
         # tolist, which cannot be traced. Capture their actual output on
         # CPU, then substitute only the cache during torch.export.
@@ -403,11 +416,24 @@ def run_case(name: str, directory: Path, run_vulkan: bool, target: str) -> dict:
                 raise ValueError("Unexpected shifted-window export shape")
             return groups
 
+        grouped_case = name.startswith("swin2d-grouped")
+        original_sdpa = blocks._sdpa_with_region_groups
         setattr(blocks, cache_name, fixed_groups)
+        if grouped_case:
+            blocks._sdpa_with_region_groups = grouped_sdpa_contiguous
         try:
+            if grouped_case:
+                with torch.inference_mode():
+                    lowered_reference = model(sample).detach().numpy()
+                np.testing.assert_allclose(
+                    lowered_reference, expected, atol=1e-6, rtol=1e-6,
+                    err_msg="Grouped index-copy legalization differs from source",
+                )
+                status["legalization"] = "contiguous grouped index-copy"
             exported = torch.export.export(model, (sample,), strict=True)
         finally:
             setattr(blocks, cache_name, source_groups)
+            blocks._sdpa_with_region_groups = original_sdpa
     else:
         exported = torch.export.export(model, (sample,), strict=True)
     exported = exported.run_decompositions({
