@@ -181,3 +181,11 @@ Use `--execute-vulkan` on a configured Vulkan device to compare native device ou
 
 The real checkpoint has **not yet been run through this gate**. Trained-weight compilation, numerics across multiple shapes, AMD GPU execution and throughput remain to be verified. Completion of Stage 2 does not imply complete CorridorKey inference: Stage 1 recurrent/temporal behavior, active C-RADIO/MoGe/RVM paths, hint carry, foreground/alpha reconstruction, HDR and scheduling behavior require independent end-to-end validation.
 
+
+## Stage 1 integrated temporal graph gate
+
+`scripts/ci/prove_stage1_vulkan.py` now instantiates the actual `Stage1` class and feeds two frames of RGB, subject hint/quality, and the documented pre-normalized MoGe feature interface into the full stage-one forward path. This avoids instantiating foundation networks during the import proof without substituting another Stage 1 architecture. The exercised path includes RGB/hint patchification, the /16 encoder, /64 temporal body, /16 intermediate refinement, /16 decoder and the source baton/auxiliary output heads. The probe deliberately uses reduced channel widths, disabled checkpointing and no recurrent sites; these are explicit profile settings, not claims of compatibility with trained production topology.
+
+The export step compares the source `Stage1` output with the fully decomposed exported CPU graph using the same sample inputs and unchanged numerical tolerance. The first integrated two-frame export **passed the CPU differential gate**, exposing an IREE Vulkan code-generation error while compiling a 12-channel attention-head RMSNorm on the llvmpipe target. A 16-channel-head profile is under validation to distinguish a vectorization problem from general Stage 1 operator support. The Vulkan runtime gate remains mandatory before representing Stage 1 as numerically validated.
+
+Still required separately: actual checkpoint Stage 1 configuration and tensor loading, RVM and MoGe/C-RADIO feature integration, recurrent memory-state inputs/outputs, time-stride and streaming/Hann-window scheduling, high-resolution padded shapes, and practical AMD execution/performance. Validation on the reduced source model cannot replace any of those gates.
