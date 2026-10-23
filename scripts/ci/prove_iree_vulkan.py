@@ -76,6 +76,30 @@ def prepare(name: str):
     return model, sample, expected
 
 
+def _rms_norm_inference_math(
+    input: torch.Tensor,
+    normalized_shape,
+    weight=None,
+    eps=None,
+):
+    """Lower RMSNorm to reduction, reciprocal square root and multiplication.
+
+    Keep accumulation in fp32 for reduced-precision inputs, and apply the
+    original normalized dimensions, epsilon and learned affine weight.
+    """
+    dims = tuple(range(-len(normalized_shape), 0))
+    epsilon = torch.finfo(input.dtype).eps if eps is None else eps
+    accumulator = input.float() if input.dtype in (
+        torch.float16, torch.bfloat16
+    ) else input
+    variance = accumulator.square().mean(dim=dims, keepdim=True)
+    normalized = accumulator * torch.rsqrt(variance + epsilon)
+    normalized = normalized.to(input.dtype)
+    if weight is not None:
+        normalized = normalized * weight.to(input.dtype)
+    return normalized
+
+
 def _sdpa_inference_math(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -158,10 +182,17 @@ def run_case(name: str, directory: Path, run_vulkan: bool, target: str) -> dict:
     exported = torch.export.export(model, (sample,), strict=True)
     exported = exported.run_decompositions({
         torch.ops.aten.scaled_dot_product_attention.default: _sdpa_inference_math,
+        torch.ops.aten.rms_norm.default: _rms_norm_inference_math,
     })
-    if any("scaled_dot_product_attention" in str(node.target)
-           for node in exported.graph.nodes):
-        raise AssertionError("An SDPA operation bypassed the export legalization")
+    unlegalized = [
+        str(node.target)
+        for node in exported.graph.nodes
+        if any(op in str(node.target) for op in (
+            "scaled_dot_product_attention", "aten.rms_norm"
+        ))
+    ]
+    if unlegalized:
+        raise AssertionError(f"Unlegalized inference operators: {unlegalized}")
     output = aot.export(exported)
     output.verify()
     mlir_path = directory / "import.mlir"
