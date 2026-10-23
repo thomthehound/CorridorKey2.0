@@ -21,8 +21,30 @@ import numpy as np
 import torch
 
 from prove_iree_vulkan import (
-    _read_device_result, _rms_norm_inference_math, _sdpa_inference_math,
+    _read_device_result, _sdpa_inference_math,
 )
+
+
+def _rms_norm_stage1_math(
+    input: torch.Tensor, normalized_shape, weight=None, eps=None,
+):
+    """Source RMSNorm with an explicitly typed stabilization tensor.
+
+    IREE's Vulkan conversion can otherwise emit arith.addf with a
+    shape/dtype-mismatched epsilon operand for Stage1's 5D token paths.
+    Keep the source accumulation convention and learned weight unchanged.
+    """
+    dimensions = tuple(range(-len(normalized_shape), 0))
+    epsilon = torch.finfo(input.dtype).eps if eps is None else eps
+    accumulation = (input.float() if input.dtype in (
+        torch.float16, torch.bfloat16,
+    ) else input)
+    variance = accumulation.square().mean(dim=dimensions, keepdim=True)
+    stable = variance + torch.full_like(variance, epsilon)
+    output = (accumulation * torch.rsqrt(stable)).to(input.dtype)
+    if weight is not None:
+        output = output * weight.to(input.dtype)
+    return output
 
 
 class Stage1OutputABI(torch.nn.Module):
@@ -129,7 +151,7 @@ def export_stage1(model, args):
         torch.ops.aten.scaled_dot_product_attention.default:
             _sdpa_inference_math,
         torch.ops.aten.rms_norm.default:
-            _rms_norm_inference_math,
+            _rms_norm_stage1_math,
     })
     unconverted = [
         str(node.target) for node in exported.graph.nodes
