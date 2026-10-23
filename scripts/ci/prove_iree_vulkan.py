@@ -28,6 +28,8 @@ def cases():
     from corridorkey.blocks import (
         FullAttention3D,
         FullSpatialAttention2D,
+        FullSpatialBlock2D,
+        CSwinBlock2D,
         LayerNorm2d,
         RMSNorm,
         SwiGLU,
@@ -90,6 +92,21 @@ def cases():
             lambda: SwinBlock3D(dim=16, num_heads=2, window_H=4,
                                 window_W=4, shift=(2, 0)),
             (2, 3, 5, 7, 16),
+        ),
+        # Stage2's actual three spatial transformer families at the same
+        # channel count and token grid as the complete Stage2 probe.
+        "fullspatial2d-stage2": (
+            lambda: FullSpatialBlock2D(dim=48, num_heads=4),
+            (1, 2, 2, 48),
+        ),
+        "cswin2d-stage2": (
+            lambda: CSwinBlock2D(dim=48, num_heads=4),
+            (1, 2, 2, 48),
+        ),
+        "swin2d-shift-stage2": (
+            lambda: SwinBlock2D(dim=48, num_heads=4, window_size=4,
+                                shift=(2, 2)),
+            (1, 2, 2, 48),
         ),
     }
 
@@ -156,7 +173,8 @@ def prepare(name: str):
     if name.startswith("rmsnorm"):
         with torch.no_grad():
             model.weight.copy_(torch.linspace(0.6, 1.4, 16))
-    if name.startswith(("swin2d-shift", "swin3d-shift")):
+    if name.startswith(("swin2d-shift", "swin3d-shift"))
+            or name in ("fullspatial2d-stage2", "cswin2d-stage2"):
         with torch.no_grad():
             torch.nn.init.normal_(model.attn.proj.weight, std=0.04)
             torch.nn.init.normal_(model.attn.proj.bias, std=0.02)
