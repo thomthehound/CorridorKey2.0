@@ -22,7 +22,7 @@ import numpy as np
 import torch
 
 import iree.turbine.aot as aot
-from iree_vulkan_legalizations import grouped_sdpa_contiguous
+from iree_vulkan_legalizations import grouped_sdpa_contiguous, headwise_gate_contiguous
 
 
 def cases():
@@ -418,9 +418,11 @@ def run_case(name: str, directory: Path, run_vulkan: bool, target: str) -> dict:
 
         grouped_case = name.startswith("swin2d-grouped")
         original_sdpa = blocks._sdpa_with_region_groups
+        original_gate = blocks.HeadwiseAttentionGate.forward
         setattr(blocks, cache_name, fixed_groups)
         if grouped_case:
             blocks._sdpa_with_region_groups = grouped_sdpa_contiguous
+            blocks.HeadwiseAttentionGate.forward = headwise_gate_contiguous
         try:
             if grouped_case:
                 with torch.inference_mode():
@@ -434,6 +436,7 @@ def run_case(name: str, directory: Path, run_vulkan: bool, target: str) -> dict:
         finally:
             setattr(blocks, cache_name, source_groups)
             blocks._sdpa_with_region_groups = original_sdpa
+            blocks.HeadwiseAttentionGate.forward = original_gate
     else:
         exported = torch.export.export(model, (sample,), strict=True)
     exported = exported.run_decompositions({
