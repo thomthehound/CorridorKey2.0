@@ -14,6 +14,19 @@ import torch
 import torch.nn.functional as F
 
 
+
+def headwise_gate_contiguous(self, query_tokens: torch.Tensor,
+                             attn: torch.Tensor) -> torch.Tensor:
+    """Exact gate applied in token/head order, avoiding strided vector writes.
+
+    Source computes the same sigmoid gate and applies it to each attention
+    head through a heads-first view. Token-major scaling provides an
+    equivalent layout for the compiler, restoring source ordering afterward.
+    """
+    gate = torch.sigmoid(self.proj(query_tokens)).unsqueeze(-1)
+    return (attn.transpose(-3, -2) * gate).transpose(-3, -2).contiguous()
+
+
 def grouped_sdpa_contiguous(
     q: torch.Tensor,
     k: torch.Tensor,
