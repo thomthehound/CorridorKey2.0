@@ -63,6 +63,21 @@ def cases():
     }
 
 
+class FlatOutput(torch.nn.Module):
+    """Serialize the source module's complete output as a contiguous tensor.
+
+    Shape is retained in the source-side reference; flattening is an output
+    buffer ABI representation, not a change to the model's computation.
+    """
+
+    def __init__(self, source):
+        super().__init__()
+        self.source = source
+
+    def forward(self, x):
+        return self.source(x).reshape(-1)
+
+
 def prepare(name: str):
     make, shape = cases()[name]
     torch.manual_seed(1937)
@@ -77,6 +92,8 @@ def prepare(name: str):
     if name.startswith("rmsnorm"):
         with torch.no_grad():
             model.weight.copy_(torch.linspace(0.6, 1.4, 16))
+    if name == "rmsnorm2d":
+        model = FlatOutput(model).eval()
     sample = torch.randn(shape, dtype=torch.float32)
     with torch.inference_mode():
         expected = model(sample).detach().numpy()
