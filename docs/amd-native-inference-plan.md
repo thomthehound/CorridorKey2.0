@@ -1,81 +1,122 @@
-# AMD-native inference plan
+# AMD-native inference architecture
 
 ## Objective
 
-Run the existing CorridorKey 2.0 inference model and its original weights natively on AMD GPUs on Windows and Linux, without CUDA or HIP/ROCm as required runtime dependencies. Preserve the model's foreground reconstruction, alpha quality, HDR color semantics, and temporal behavior. Build a reusable inference component that can subsequently serve compositors, batch tools, and performance-capture pipelines.
+Execute CorridorKey's original learned models and checkpoints natively on AMD GPUs under Vulkan, preserving full-resolution foreground/alpha output, HDR color and temporal semantics, and without requiring CUDA, ROCm/HIP, ONNX, or PyTorch in the deployed runtime. The import/compiler architecture must accept subsequent CorridorKey model releases without manual reimplementation of their networks.
 
-Initial baseline: Vulkan 1.4 with GPU feature-based capability selection; a Windows D3D12 execution path is a complementary target. C++23 for the native host. Do not assume that a backend advertised as supported can compile and execute this specific model correctly.
+The native core uses C++23 on Windows and Linux. Vulkan 1.4 is the initial GPU baseline; extensions are selected by queried device capabilities. The interpreter, import, compiler, scheduling, and execution layers remain independent of any compositor or animation host.
 
-## Source-of-truth contracts
+## Architectural boundaries
 
-- Load `weights/corridorkey_v2.safetensors` model configuration and weights without changing the learned architecture. Foundation model enablement must follow checkpoint metadata, not class defaults.
-- The foundation models are C-RADIOv4-SO400M, MoGe-2 ViT-B, and RVM small, with their distinct licenses. Model configuration determines which components contribute features.
-- Preserve input preprocessing: display-coded versus scene-linear sources, signed-asinh encoding, foundation RGB proxies, padding, channel conventions, and output inverse transforms.
-- Preserve Stage 1 temporal attention, overlapping Hann windows, hint carry, continuous RVM recurrent state, and Stage 2 output refinement. Stage 2 processes frames independently after the temporal baton is assembled.
-- Preserve native-resolution linear foreground and alpha outputs; expose structured frames and timestamps without requiring an encoded preview-video round trip.
-- Existing `corridorkey/*.py` is the reference implementation. The native runtime must not silently substitute approximated model behavior or switch to CPU for unsupported operators.
+```text
+Model release: source architecture + checkpoint weights + metadata
+                             |
+                CPU-side acquisition/export
+                  (isolated from runtime)
+                             |
+       PyTorch exporter / torch-mlir / IREE Turbine importer
+             (for source models written in PyTorch)
+                             |
+               Canonical MLIR representation
+         (operators, parameters, shapes, states, metadata)
+                             |
+        Graph verification, legalization and optimization
+                             |
+              Target-specific compilation
+                  /                     \
+       Vulkan SPIR-V / IREE          Future AIE/NPU backend
+                  \                     /
+          Backend-independent execution interface
+                             |
+        Native C++23 scheduling / buffer ownership / IO
+                             |
+                 Alpha + linear foreground
+```
 
-## Milestone 0: executable reference and export feasibility
+**No inference-time PyTorch dependency.** Models authored in PyTorch require a source-compatible import tool at **conversion/build time**, normally using CPU-only PyTorch export with torch-mlir/IREE Turbine. Do not use ONNX as a required or intermediate artifact. Do not build an alternate hand-coded imitation of the model. A genuinely PyTorch-free source-to-IR importer may be researched separately; parsing checkpoint weights alone cannot recover arbitrary Python model semantics.
 
-1. Inventory the exact checkpoint config, active model components, model input/output signatures, precision, tensor shapes, attention patterns, and dynamic control flow.
-2. Construct deterministic short reference clips and per-subgraph tensor fixtures for: no hint, first-frame hint, full hint, carried hints, moving edges, blur, occlusion, and HDR/linear inputs.
-3. Record Stage 1, Stage 2, foundation, and final alpha/foreground reference outputs in representative window modes (`1/1`, `8/4`, `24/12`). Reference generation may use a CUDA machine; minimal subgraphs can use a CPU reference where feasible.
-4. Evaluate PyTorch export and ONNX/IREE import **separately** for RVM, MoGe, checkpoint-enabled C-RADIO, Stage 1, and Stage 2. Identify unsupported operations, data-dependent Python control flow, shape constraints, and required decompositions. Attention masks/region routing and recurrent state deserve special attention.
-5. Probe IREE Vulkan execution and Windows ML / ONNX Runtime execution-provider coverage on a real AMD device. Require an execution-provider partition report; CPU fallback must be visible and fail the native GPU acceptance test.
+**Compilation contract.** Retain source/checkpoint version and model configuration as semantic inputs to compilation. The compilation pipeline detects unsupported operations or control flow, produces an actionable coverage report, and fails rather than silently replacing operators, weakening temporal context, or falling back to CPU. A new model release may require a new operator legalization or exporter adaptation, but must not require a new hand-written GPU implementation of its entire network.
 
-**Gate:** A documented and reproducible conversion route for every active graph; otherwise solve the specific exporter/operator gap before building a second implementation of the model.
+**Separation of model and application behavior.** Compile well-defined model subgraphs; manage video reading, temporal window scheduling, hint carry, RVM chronological state, Hann blending, and Stage 2 frame processing in explicit native orchestration. Do not freeze release-specific Python scheduler implementation details into unrelated graph kernels. The scheduler must preserve source semantics for each model version.
 
-## Milestone 1: correct end-to-end AMD execution
+## Source-of-truth semantics
 
-- Compile and execute the complete set of required graph partitions on AMD without CUDA. IREE/Vulkan is the preferred portable candidate; Windows ML/DirectML/MIGraphX can supply an independent compatibility and performance reference.
-- Keep model configuration, checkpoint loading, hint semantics, and temporal state orchestration common across execution backends.
-- Run a short clip from source pixels to native alpha and foreground using the real checkpoints. Preserve intermediate tensors for layerwise comparisons.
-- Record exact precision and execution-provider placements. Do not describe a mixed CPU/GPU run as native GPU inference.
-- Support Windows and Linux. A backend may remain platform-specific, but a complete validated Vulkan path should not depend on a proprietary driver stack beyond ordinary Vulkan GPU drivers.
+- Read checkpoint model configuration; model defaults are not authoritative. The source tree includes optional C-RADIOv4-SO400M, MoGe-2 ViT-B, and RVM small foundation models. Determine active components from the actual checkpoint.
+- Preserve signed-asinh scene-linear RGB encoding, source color transforms, resolution/padding, per-foundation input resampling, feature normalization, and final inverse transforms.
+- Preserve spatiotemporal Stage 1 attention, RoPE, shifted-window masking and routing, CSwin operations, recurrent state, per-window hints, carried hints, and overlapping Hann accumulation.
+- Preserve Stage 2 refined alpha and foreground, including unclamped linear/HDR foreground and correct straight/premultiplied output semantics.
+- Preserve native frame timestamps and expose a structured in-memory output API without forcing an encoded preview or disk round-trip.
+- Treat low-VRAM window length and precision as explicit operating modes because both can affect quality or performance.
 
-**Gate:** The complete clip passes reference comparisons, with discrepancies understood rather than hidden by loose aggregate tolerances.
+## Milestone 0 — Model and importer proof
 
-## Milestone 2: native runtime and memory architecture
+1. Audit the checkpoint metadata, active networks, input/output tensor interfaces, operator coverage, precision, and dynamic control flow; enumerate graph partitions and shape profiles.
+2. Use an isolated CPU-capable importer built on `torch.export` / `torch-mlir` / `iree-turbine` to capture the actual source models as MLIR. PyTorch is import-time tooling only.
+3. Diagnose dynamic masking and data-dependent indexing in `corridorkey/blocks.py`; specialize geometry-dependent region maps and masks where semantics permit. Support explicit shape variants rather than inventing a different attention rule.
+4. Produce deterministic reference fixtures for the original operations and subgraphs. Include no hint, first-frame hint, full hint, carried hint, overlapping windows, occlusion/motion edges, HDR, and multiple precision profiles.
+5. Compile the active foundation graph(s), Stage 1 and Stage 2 using IREE's `vulkan-spirv` backend. Verify the compiled binary executes each partition on an AMD GPU without CUDA/ROCm/ONNX or an implicit CPU kernel.
+6. Report unsupported ops and their exact legalization path. Extend the importer/compiler only where necessary, then rerun export. Never substitute a different foundation network.
 
-- Implement a C++23 runtime with explicit video/image inputs, frame timestamps, model/profile selection, recurrent-state ownership, and native alpha/foreground outputs. Retain Python as a reference/export tool, not a required inference host.
-- Preallocate and reuse persistent tensor buffers and compiled graph variants across shots and frames. Cache by graph configuration, device capabilities, and resolution/window profile as needed.
-- Treat foundation extraction, Stage 1 Hann accumulation, hint carry, Stage 2, and image output as one scheduled pipeline, not a set of full-frame host/device transfers.
-- Support both GPU-resident streaming and bounded-VRAM execution with an explicit, measured offload budget. Preserve the exact low-VRAM semantics, including chronological RVM inference and overlapping-window blending.
-- Establish native Vulkan resource/synchronization ownership; provide D3D12 interop where supported without imposing a D3D12-only core.
+**Gate:** Successful model capture and Vulkan execution of all required graph partitions with layerwise comparisons against the original reference.
 
-**Gate:** Frame processing no longer requires the original Python/CUDA path, intermediate state remains consistent, and measured transfer/allocation overhead is reported.
+## Milestone 1 — Complete source-faithful Vulkan inference
 
-## Milestone 3: performance engineering
+- Load exact weights and model metadata, compile required shape/window variants, and run a complete clip through foundation inference, Stage 1 and Stage 2.
+- Implement common runtime interfaces for stateful inputs, outputs, tensor ownership, feature caches, and versioned scheduler configuration.
+- Preserve hint/carry/recurrent semantics, overlapping feature accumulation, padding, output cropping, color transforms, and HDR precision.
+- Check alpha and foreground reference agreement per layer and in the final image; investigate visually meaningful or temporally systematic errors instead of relying only on loose mean error thresholds.
+- Record the actual GPU execution graph and all host transfers. Host scheduling is expected; hidden CPU neural-operator execution is not an acceptable native-GPU result.
 
-Measure each component before implementing targeted optimizations:
+**Gate:** End-to-end inference with actual checkpoints on AMD under Vulkan, with validated original-model behavior and explicit performance/memory accounting.
 
-- Attention: fused/scaled-dot-product attention, RoPE, shifted-window masks, CSwin partitions, recurrent execution, and temporal window scheduling.
-- Convolution/linear/MLP: compiled operator fusion, tensor layout, SIMD subgroup operations, cooperative matrix support where device capabilities allow.
-- Precision: reference BF16 behavior; test FP16, mixed precision, and FP32 at sensitive boundaries against reference. Do not assume FP16 is numerically interchangeable with BF16, especially for HDR.
-- Minimize intermediate conversion, redundant inference over overlapping windows, unnecessary device synchronization, CPU feature-map staging, and repeated compilation.
-- Use asynchronous execution and overlap decoding, preprocessing, inference, and output when profiling shows a benefit. Make cache/memory tradeoffs explicit.
-- Quantization, NPU partitioning, and model distillation are **separate, optional** experiments after full-fidelity GPU correctness and baseline performance are established.
+## Milestone 2 — Native host, persistent memory and extensibility
 
-**Gate:** Publish per-stage latency, end-to-end throughput, startup/compile time, peak VRAM, host-to-device bytes, and output-quality deltas for representative resolutions and window lengths, including comparison with a Windows GPU provider where available. No unevidenced speedup claims.
+- Build the native C++23 inference runtime with Vulkan integration, predictable resource ownership, device capabilities, error reporting, and input/output interfaces.
+- Preallocate/reuse graph inputs, outputs and scratch buffers; pool per-window storage; minimize host/device round trips.
+- Implement asynchronous transfer and execution scheduling where correct and beneficial. Retain bounded-VRAM profiles without silently compromising model semantics.
+- Cache compiled variants by model config, shape profile, precision strategy, target feature set and relevant compiler settings. Invalidate incompatible artifacts based on metadata/schema compatibility.
+- Provide Windows/Linux builds, CPU-side validation, and hardware AMD test targets.
+- Keep IREE as the initial compiler/runtime implementation, not as a public model API that prevents later compiler substitutions. Any custom GPU kernels integrate through compiler lowering or explicit verified runtime operators, rather than forming a shadow network.
 
-## Test and validation matrix
+**Gate:** The distributed inference path requires neither PyTorch nor ONNX/ROCm/CUDA, and can be driven by native video, image, or memory clients.
 
-- Build/test native code on `windows-latest` and current Ubuntu LTS; run hardware GPU tests on real AMD hardware, not a GitHub-hosted CPU runner.
-- Exercise feature-based compatibility, with an AMD RDNA1 architectural target and Radeon 680M-class integrated GPU as a practical lower-performance reference where viable. Record actual extensions/features rather than inferring from model names.
-- Invariants: shapes and crop alignment; color transforms and negative/HDR values; alpha edge quality; temporal smoothness without erased motions; hint identity and carry; continuous recurrent state; deterministic output within defined numerical tolerance.
-- Use layerwise numerical comparisons, masked MAE/RMSE and worst-case errors, boundary-focused alpha metrics, temporal flicker/identity tests, and real-world visual fixtures. Numerical thresholds follow measured reference variation and production relevance, not arbitrary global thresholds.
-- Benchmark `720p` and `1080p` first; expand to `1440p` and `4K` with bounded-VRAM modes. Use fixed source clips, identical window settings, and warmed-up/steady-state and cold-start measurements.
+## Milestone 3 — Measured GPU performance
 
-## Distribution and scope
+Profile before tuning:
 
-- Preserve the Corridor Key Licence and third-party notices; do not relicense the fork as Apache/MIT. CorridorKey derivatives are subject to release/attribution, redistribution, and commercial-integration restrictions in `LICENSE`.
-- Maintain upstream-compatible CLI and output semantics while adding an explicit backend choice and structured inference API.
-- Do not couple the keying core to a particular compositor, tracking framework, 3D engine, or pose-estimation pipeline. Keep high-precision mattes, foreground RGB, and frame timing accessible to downstream tools.
-- Future NPU+GPU work should be separately benchmarked against GPU-only end-to-end execution, accounting for compilation support, memory copies, synchronization, and precision differences.
+- Flash/fused SDPA-style attention, shifted windows, CSwin, RoPE and recurrent execution.
+- Linear/conv/MLP fusion, tensor layout, subgroup operations, and optional cooperative matrices based on queried Vulkan capabilities.
+- BF16/FP16/FP32 numerical strategies. FP16 is not automatically equivalent to BF16, especially for HDR; quantify error at sensitive points.
+- Unnecessary sync, per-frame allocation, CPU staging and duplicate computation across Hann overlaps, without changing learned temporal behavior.
+- Decoder/inference/output overlap, throughput versus latency, compilation/startup cost and memory budgets.
+- Benchmark identical model/window/quality settings at 720p, 1080p, 1440p and 4K, reporting mean/p95 latency, FPS, memory, transfer bytes and quality metrics.
 
-## Immediate next change set
+**Gate:** Measured performance gains with preserved alpha, foreground, edge, identity, and temporal quality. Never claim a speedup from reduced resolution or shorter temporal context without naming the changed setting.
 
-1. Add a dependency-light diagnostic that reads checkpoint metadata and reports graph/precision/capability requirements without initializing CUDA.
-2. Introduce deterministic reference-fixture capture and per-component export probes.
-3. Produce a conversion/coverage report and choose the first completely viable AMD backend from measured evidence.
-4. Implement end-to-end execution before optimizing any isolated operator beyond what is necessary for correct full-model support.
+## Future NPU + GPU execution
+
+Vulkan/SPIR-V is the **GPU** target, not a portable NPU driver. The shared MLIR graph is the NPU expansion point. Prototype AMD XDNA compilation through the appropriate MLIR-AIE/IRON/AIE backend and its hardware runtime (for example XRT or supported native alternatives), independently from GPU Vulkan.
+
+- Partition at graph boundaries according to measured execution capabilities, precision, scratchpad and model storage, transfer costs, and dependency scheduling.
+- Account for GPU ↔ NPU data movement and synchronization; fused attention or intermediate feature matrices are not assumed NPU-capable.
+- Prefer NPU work only when end-to-end quality and latency/throughput exceed the optimized GPU-only path.
+- NPU execution must preserve the exact model's numerical/semantic contract or be exposed as an explicitly different precision/performance profile.
+- Keep an optional D3D12 integration route for Windows interoperability, but do not require a full second neural compiler frontend or separate manually maintained network.
+
+## Validation and maintenance
+
+- Model compatibility CI ingests each upstream CorridorKey checkpoint/config and emits: imported graph inventory, unsupported ops, compiled graph coverage, precision and device requirements, output-diff report, and full end-to-end smoke results where hardware is available.
+- Source model release updates pass through import → legalization → compilation → differential tests → benchmark. Supported operators and schedulers remain reusable.
+- Test existing graph fixtures as regression tests when changing compiler, IREE, MLIR, Vulkan features or AMD drivers.
+- Build native components on `windows-latest` and current Ubuntu LTS. GPU correctness and performance must be validated on real AMD hardware.
+- Initial architectural portability target: Vulkan 1.4-capable AMD RDNA GPUs, subject to actual extension/precision support. Radeon 680M-class integrated GPUs are a performance floor to evaluate, not a promise of identical fidelity and throughput at every capture resolution.
+- Maintain CorridorKey attribution and the source license, including derivative-release and commercial-integration provisions, along with all third-party notices.
+- Keep the inference engine independent of any compositor, pose tracker, 3D character editor, or video-capture implementation.
+
+## Immediate development sequence
+
+1. Implement a no-GPU metadata inspection utility for the runtime checkpoint to report active graphs, shapes, precision and external assets.
+2. Build the CPU-side PyTorch-to-MLIR export harness for **real** foundation/Stage 1/Stage 2 graphs and generate an unsupported-op report.
+3. Preserve intermediate reference tensors at graph boundaries and small subgraphs, including temporal and HDR cases.
+4. Execute complete imported graph partitions on Vulkan, systematically legalizing unsupported operations in reusable compiler passes.
+5. Integrate the original temporal scheduler semantics and prove full-clip native GPU correctness before optimization.
