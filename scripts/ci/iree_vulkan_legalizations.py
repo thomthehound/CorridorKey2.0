@@ -36,10 +36,12 @@ def grouped_sdpa_contiguous(
     batch_windows = total_windows // num_windows
 
     # Route positions are source-geometry constants for a compiled shape
-    # profile. 0 is the initial zero row, matching unassigned source pixels.
+    # profile. The initial full-window zero region represents unassigned
+    # padding tokens. Using a regular window-sized allocation also avoids
+    # an irregular one-row vector constant in the Vulkan software backend.
     route = [0] * (total_windows * tokens)
-    pieces = [q.new_zeros((1, heads, head_dim))]
-    cursor = 1
+    pieces = [q.new_zeros((tokens, heads, head_dim))]
+    cursor = tokens
 
     def windows_for(base: tuple[int, ...]):
         # Window-major ordering is identical to _batched_windows upstream.
