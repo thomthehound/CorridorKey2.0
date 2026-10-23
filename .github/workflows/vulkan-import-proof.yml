@@ -107,6 +107,12 @@ jobs:
             python scripts/ci/prove_stage2_vulkan.py --output build/stage2-proof --target rdna1
           fi
 
+      - name: Diagnose Stage2 numerical mismatch
+        if: failure() && runner.os == 'Linux'
+        shell: bash
+        run: |
+          python scripts/ci/diagnose_stage2_vulkan.py --output build/stage2-diagnostic --target llvmpipe
+
       - name: Publish proof report and compiler artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -115,5 +121,6 @@ jobs:
           path: |
             build/vulkan-proof/
             build/stage2-proof/
+            build/stage2-diagnostic/
           if-no-files-found: warn
           retention-days: 7
