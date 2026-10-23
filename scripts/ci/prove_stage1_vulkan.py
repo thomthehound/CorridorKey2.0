@@ -39,9 +39,14 @@ def _rms_norm_stage1_math(
     accumulation = (input.float() if input.dtype in (
         torch.float16, torch.bfloat16,
     ) else input)
-    variance = accumulation.square().mean(dim=dimensions, keepdim=True)
-    stable = variance + torch.full_like(variance, epsilon)
-    output = (accumulation * torch.rsqrt(stable)).to(input.dtype)
+    # Mean(x² + eps) == mean(x²) + eps. Fuse stabilization into the
+    # per-element reduction input, avoiding the problematic scalar-vector
+    # add immediately after the reduction in the Vulkan compiler.
+    squared = accumulation.square()
+    variance = (squared + torch.full_like(squared, epsilon)).mean(
+        dim=dimensions, keepdim=True,
+    )
+    output = (accumulation * torch.rsqrt(variance)).to(input.dtype)
     if weight is not None:
         output = output * weight.to(input.dtype)
     return output
