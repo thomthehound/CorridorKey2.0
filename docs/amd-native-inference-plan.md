@@ -125,7 +125,7 @@ Vulkan/SPIR-V is the **GPU** target, not a portable NPU driver. The shared MLIR 
 
 The `.github/workflows/vulkan-import-proof.yml` workflow imports actual source modules from `corridorkey.blocks` using isolated CPU-side PyTorch, compiles the graphs to `vulkan-spirv` with IREE, and preserves MLIR, compiled VMFB and structured reference-output artifacts. Windows checks RDNA1-targeted compilation; Ubuntu 24.04 executes through Mesa llvmpipe and numerically compares device outputs to the unchanged source reference. This validates the compilation and GPU execution *semantics* for exercised graphs; it does not constitute an AMD hardware performance test.
 
-The proof currently exercises eighteen configurations:
+The proof currently exercises twenty configurations:
 - RMSNorm with channel-first, channel-last and small NCHW output shapes
 - SwiGLU
 - Full-spatial and full-spatiotemporal attention
@@ -133,6 +133,7 @@ The proof currently exercises eighteen configurations:
 - Two shifted Swin-3D variants, including padded, multi-frame and multi-batch region routing
 - Full-spatial, CSwin, and shifted-Swin blocks at the reduced Stage 2 token layout
 - Native patchification and depatchification, each with non-overlapping and overlapping convolution kernels
+- Two source-derived grouped Swin-2D region-mask configurations, including a small degenerate window and a batched padded profile
 
 The source-derived 2D shifted-region cache uses CPU indexing and grouped scatter unsuitable for static graph capture. The importer specializes shape-dependent cached groups, then exposes them as a constant boolean mask on the existing Swin attention module. It numerically verifies the legalized module before exporting it. This is a proof of correctness for modest attention windows; dense quadratic masks are **not** the production strategy for long temporal windows. The 3D proof instead retains the original grouped gather/scatter implementation and specializes only the geometry cache; both compilation and software-Vulkan numerical execution succeed on the tested shapes.
 
