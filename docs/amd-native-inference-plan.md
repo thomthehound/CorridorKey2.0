@@ -165,6 +165,12 @@ When an integrated comparison fails, `scripts/ci/diagnose_stage2_vulkan.py` inst
 
 `scripts/ci/prove_checkpoint_stage2.py` reads the runtime safetensors header, resolves the original `CorridorKeyV3` constructor defaults directly from source, instantiates exactly its `Stage2` configuration, and loads the checkpoint's `stage2.*` tensors with strict key/shape checks. It does **not** construct or download the frozen foundation networks. Its synthetic checkpoint round-trip and missing-key rejection are exercised on both CI platforms.
 
+To obtain only the official CorridorKey checkpoint without downloading
+the foundation networks, run `python scripts/download_weights.py
+--stage2_checkpoint_only` from the repository root. This intentionally
+does not fetch MoGe, C-RADIO, RVM, or foundation statistics because the
+standalone Stage 2 checkpoint proof does not instantiate them.
+
 With a real runtime checkpoint available, validate trained weights and source CPU inference:
 
 ```bash
