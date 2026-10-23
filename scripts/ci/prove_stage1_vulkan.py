@@ -21,35 +21,26 @@ import numpy as np
 import torch
 
 from prove_iree_vulkan import (
-    _read_device_result, _sdpa_inference_math,
+    _read_device_result, _rms_norm_inference_math, _sdpa_inference_math,
 )
 
 
-def _rms_norm_stage1_math(
-    input: torch.Tensor, normalized_shape, weight=None, eps=None,
-):
-    """Source RMSNorm with an explicitly typed stabilization tensor.
+class FlattenedStage1RMSNorm(torch.nn.Module):
+    """Preserve the source RMSNorm on a two-dimensional token-major view.
 
-    IREE's Vulkan conversion can otherwise emit arith.addf with a
-    shape/dtype-mismatched epsilon operand for Stage1's 5D token paths.
-    Keep the source accumulation convention and learned weight unchanged.
+    Normalization is strictly over the last axis in the original class,
+    so flattening leading dimensions is an exact, source-weight-preserving
+    tensor layout legalization. It avoids high-rank RMSNorm fusion during
+    Vulkan code generation.
     """
-    dimensions = tuple(range(-len(normalized_shape), 0))
-    epsilon = torch.finfo(input.dtype).eps if eps is None else eps
-    accumulation = (input.float() if input.dtype in (
-        torch.float16, torch.bfloat16,
-    ) else input)
-    # Mean(x² + eps) == mean(x²) + eps. Fuse stabilization into the
-    # per-element reduction input, avoiding the problematic scalar-vector
-    # add immediately after the reduction in the Vulkan compiler.
-    squared = accumulation.square()
-    variance = (squared + torch.full_like(squared, epsilon)).mean(
-        dim=dimensions, keepdim=True,
-    )
-    output = (accumulation * torch.rsqrt(variance)).to(input.dtype)
-    if weight is not None:
-        output = output * weight.to(input.dtype)
-    return output
+
+    def __init__(self, source):
+        super().__init__()
+        self.source = source
+
+    def forward(self, x):
+        shape = x.shape
+        return self.source(x.reshape(-1, shape[-1])).reshape(shape)
 
 
 class Stage1OutputABI(torch.nn.Module):
@@ -146,17 +137,40 @@ def export_stage1(model, args):
             raise ValueError(f"Unexpected Stage1 shifted region {signature}")
         return signatures[signature]
 
+    # Replace only the *presentation* of last-axis RMSNorm during export.
+    # The original modules/weights remain owned by the source class and
+    # are restored immediately after graph capture.
+    with torch.inference_mode():
+        authoritative = tuple(t.detach().numpy().copy() for t in model(*args))
+    saved = []
+    for parent in list(model.named_modules()):
+        module = parent[1]
+        for name, child in list(module.named_children()):
+            if isinstance(child, blocks.RMSNorm):
+                saved.append((module, name, child))
+                setattr(module, name, FlattenedStage1RMSNorm(child))
+    if not saved:
+        raise AssertionError("Expected source Stage1 RMSNorm layers")
     blocks._shifted_region_groups_3d_cached = fixed
     try:
+        with torch.inference_mode():
+            flattened = tuple(t.detach().numpy() for t in model(*args))
+        for index, (reference, actual) in enumerate(zip(authoritative, flattened)):
+            np.testing.assert_allclose(
+                actual, reference, atol=0.0, rtol=0.0,
+                err_msg=f"Flattened Stage1 RMSNorm changed source output {index}",
+            )
         exported = torch.export.export(model, args, strict=True)
     finally:
+        for parent, name, original_norm in saved:
+            setattr(parent, name, original_norm)
         blocks._shifted_region_groups_3d_cached = original
 
     exported = exported.run_decompositions({
         torch.ops.aten.scaled_dot_product_attention.default:
             _sdpa_inference_math,
         torch.ops.aten.rms_norm.default:
-            _rms_norm_stage1_math,
+            _rms_norm_inference_math,
     })
     unconverted = [
         str(node.target) for node in exported.graph.nodes
