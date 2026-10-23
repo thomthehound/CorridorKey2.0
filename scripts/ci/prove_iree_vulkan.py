@@ -429,7 +429,7 @@ def run_case(name: str, directory: Path, run_vulkan: bool, target: str) -> dict:
                     lowered_reference, expected, atol=1e-6, rtol=1e-6,
                     err_msg="Grouped index-copy legalization differs from source",
                 )
-                status["legalization"] = "contiguous grouped index-copy"
+                status["legalization"] = "packed grouped-attention gather"
             exported = torch.export.export(model, (sample,), strict=True)
         finally:
             setattr(blocks, cache_name, source_groups)
