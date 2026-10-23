@@ -15,6 +15,9 @@ import sys
 import traceback
 from pathlib import Path
 
+# Direct execution from scripts/ci must resolve the repository's package.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 import numpy as np
 import torch
 
