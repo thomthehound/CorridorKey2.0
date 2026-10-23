@@ -140,6 +140,15 @@ def main() -> int:
         np.save(args.output / "reference.npy", expected)
         exported, profile_count = export_stage2(model, rgb, baton)
         status["geometry_signatures"] = profile_count
+        with torch.inference_mode():
+            imported_output = exported.module()(rgb, baton).detach().cpu().numpy()
+        np.save(args.output / "exported_cpu_output.npy", imported_output)
+        cpu_diff = np.abs(imported_output - expected)
+        status["export_max_absolute_error"] = float(cpu_diff.max())
+        status["export_mean_absolute_error"] = float(cpu_diff.mean())
+        np.testing.assert_allclose(imported_output, expected,
+                                   atol=2e-5, rtol=2e-5,
+                                   err_msg="Source vs decomposed exported Stage2 mismatch")
         compiled = aot.export(exported)
         compiled.verify()
         compiled.save_mlir(args.output / "stage2.mlir")
@@ -173,6 +182,22 @@ def main() -> int:
             np.save(args.output / "vulkan_output.npy", actual)
             if actual.shape != expected.shape:
                 raise AssertionError(f"shape mismatch {actual.shape} vs {expected.shape}")
+            diff = np.abs(actual - expected)
+            status["vulkan_max_absolute_error"] = float(diff.max())
+            status["vulkan_mean_absolute_error"] = float(diff.mean())
+            status["vulkan_p99_absolute_error"] = float(np.percentile(diff, 99))
+            status["vulkan_channel_max_absolute_errors"] = [
+                float(diff[:, :, ch].max()) for ch in range(diff.shape[2])
+            ]
+            failed = np.argwhere(~np.isclose(actual, expected, rtol=3e-3, atol=3e-3))
+            if len(failed):
+                print(f"[stage2] {len(failed)} mismatched output values, "
+                      f"max={diff.max():.7g} mean={diff.mean():.7g}", flush=True)
+                for position in failed[:16]:
+                    idx = tuple(map(int, position))
+                    print(f"  {idx}: Vulkan={actual[idx]:.8g}, "
+                          f"source={expected[idx]:.8g}, "
+                          f"CPU-export={imported_output[idx]:.8g}", flush=True)
             np.testing.assert_allclose(actual, expected, rtol=3e-3, atol=3e-3)
             status["max_absolute_error"] = float(np.max(np.abs(actual - expected)))
             status["vulkan_execute"] = True
