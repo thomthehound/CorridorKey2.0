@@ -145,24 +145,38 @@ Other observed importer requirements:
 
 **Next mandatory integration gate:** import checkpoint-backed Stage 1 and Stage 2 with their active foundations and versioned scheduling contracts, then execute short real footage with alpha, foreground, hint-carry and HDR differential tests. This must also cover large masked temporal attention without dense quadratic materialization and test actual AMD driver execution. No synthetic-weight module proof should be represented as complete model or production performance compatibility.
 
-## Integrated Stage 2 export and differential gate
+## Integrated Stage 2 Vulkan correctness
 
-`scripts/ci/prove_stage2_vulkan.py` instantiates the complete source `Stage2` class with an eight-block reduced-width configuration and executes its original RGB patchification, full-spatial/CSwin/Swin stack, learned late RGB skip, and four-channel depatchification. The deterministic probe activates zero-initialized residual and output weights so that passing results cannot be attributed to an effectively zero network.
+`scripts/ci/prove_stage2_vulkan.py` exports the complete source `Stage2` class in a deterministic reduced-width eight-block configuration. The proof retains original patchification, all pre/post transformer blocks (full-spatial, CSwin and shifted Swin), learned late pixel skip, and depatchification. The otherwise-zero residual projections are initialized to nontrivial deterministic values to ensure attention errors cannot be hidden by zero outputs.
 
-Only model-independent geometry caches are specialized at import time; all learned modules and their weights remain source-authored. The test compares three values independently: original PyTorch Stage 2, the exported/decomposed graph run on CPU, and Vulkan SPIR-V execution through llvmpipe. RDNA-targeted compilation is checked separately on Windows.
+The source output, the decomposed exported CPU graph, and the executed software-Vulkan graph are compared independently. Windows verifies RDNA1-targeted SPIR-V compilation. The existing tolerances remain unchanged. The full Stage 2 graph now exports, compiles, executes, and **passes its numerical comparison** on Ubuntu software Vulkan. The component suite passes 20/20 on Windows (compilation) and Linux (execution).
 
-The integrated graph **successfully exports, compiles and executes**, while its CPU-exported form agrees with the source reference. The first Vulkan graph differed at nine of 4096 output values (maximum absolute error approximately 0.00355). Flattening CSwin's stripe-head layout before concatenation preserved the original arithmetic and corrected the separate CSwin source-block regression; the integrated graph now has two values outside its fixed output tolerance (maximum absolute error approximately 0.00325). Static RoPE tables, a channel-last result ABI, and changing the IREE optimization level did not eliminate these two differences. The source-element numerical gate therefore still fails.
+The path to that result revealed two IREE code generation constraints:
 
-The importer additionally checks original patch/depatchify and three spatial transformer families in Vulkan against source results. `scripts/ci/diagnose_stage2_vulkan.py` instruments boundaries in the **existing exported graph** to compare intermediate tensors against software Vulkan and locate the first meaningful divergence. When the integrated gate fails on Linux, CI executes this diagnostic and preserves its tensor samples and report, without suppressing the failure or relaxing the acceptance tolerance.
+- CSwin's five-dimensional head gating/concatenation produced incorrect software-Vulkan values. Source-exact gate application before flattening into NHWC was separately verified and repairs the CSwin regression.
+- The reference shifted Swin-2D region assembly uses grouped indexed writes. The original full graph diverged first after pre-block 1 (up to 0.026 in the reduced test), eventually leaving a small final-image mismatch. Attempts to replace the scatter with packed indexed gathers either produced incorrect Vulkan results or failed compilation. The passing import uses the source's **static region membership as a registered boolean mask buffer**, leaving Q/K/V, projections, head gating, and all learned weights unchanged. Padding-only rows have defined zero outputs, and CPU differential checks enforce equivalence.
 
-These source-topology tests are a necessary intermediate milestone, not a claim of production checkpoint compatibility. A complete production proof still requires actual 1280-channel Stage 2 weights, the active foundation models, Stage 1's real recurrent and temporal semantics, and hardware AMD performance measurements.
+The mask-based lowering is a **correctness import path**, not the final performance path. For a window containing N tokens, its mask requires O(N²) entries. Long-window/temporal production execution needs a source-equivalent fused or explicitly grouped Vulkan kernel with bounded working storage and no per-token scalar gathers. The original grouped Swin-3D path remains separately exercised by the component proof; do not extrapolate the 2D masked solution to Stage 1's temporal graphs.
 
-## Grouped Swin-2D Vulkan correctness gate
+When an integrated comparison fails, `scripts/ci/diagnose_stage2_vulkan.py` instruments the exported computation at true inter-block inputs, attention and output boundaries, and saves reference/Vulkan tensors. This differential path remains available to catch new shape- or backend-dependent failures.
 
-The integrated reduced-width Stage 2 test first diverges in pre-block 1, a shifted Swin-2D block. Exported-graph probes show the preceding block's output matches source within approximately `1.2e-6`, but the tensor entering pre-block 2 differs by up to `0.026`. The final image discrepancy (approximately `0.00325` maximum absolute error) is a downstream effect. These observations are from a synthetic-weight 2×2-token Stage 2 profile, not the production checkpoint.
+## Trained checkpoint Stage 2 gate
 
-The prior stand-alone Swin-2D proof lowered cached regions to a dense boolean attention mask. That numerically passes for small windows but does **not** exercise CorridorKey's integrated grouped Q/K/V gather and result scatter. Two additional stand-alone regression profiles now exercise the source-derived grouped path, including the degenerate 2×2 token grid and a larger multi-batch, partially padded arrangement. The small case initially failed Vulkan output comparison for 100/192 values, while the larger case passed.
+`scripts/ci/prove_checkpoint_stage2.py` reads the runtime safetensors header, resolves the original `CorridorKeyV3` constructor defaults directly from source, instantiates exactly its `Stage2` configuration, and loads the checkpoint's `stage2.*` tensors with strict key/shape checks. It does **not** construct or download the frozen foundation networks. Its synthetic checkpoint round-trip and missing-key rejection are exercised on both CI platforms.
 
-`scripts/ci/iree_vulkan_legalizations.py` adds a source-equivalent, **linear-working-memory** packed-gather lowering: execute the original grouped SDPA calls, pack only computed window/token results, and gather them by a geometry-derived source-order route table. No quadratic dense attention masks or GPU-side indexed scatter are required. This approach passed CPU differential checks, but the small Vulkan software target exposed an IREE SPIR-V legalization issue involving a `vector<24xf32>` constant in the headwise attention gate. A source-equivalent token-major headwise-gate lowering is now under CI evaluation alongside the packed gather. This work remains provisional until both the small grouped regression and the integrated Stage 2 numerical test pass on software Vulkan; neither the RDNA-target compile-only check nor CPU equivalence can establish Vulkan numerical correctness.
+With a real runtime checkpoint available, validate trained weights and source CPU inference:
 
-Future full-model validation must preserve sparse/grouped attention efficiency and test model weights, multiple spatial/temporal profiles and real AMD GPUs rather than accepting green synthetic source-block tests as proof of complete inference.
+```bash
+python scripts/ci/prove_checkpoint_stage2.py weights/corridorkey_v2.safetensors --height 64 --width 64
+```
+
+To additionally export the trained graph and compile it for the RDNA1 Vulkan target:
+
+```bash
+python scripts/ci/prove_checkpoint_stage2.py weights/corridorkey_v2.safetensors --height 64 --width 64 --compile --target rdna1
+```
+
+Use `--execute-vulkan` on a configured Vulkan device to compare native device output to trained-weight source inference. The tool supports the optional two-output Stage 2 refinement contract and preserves both outputs in reports. CPU PyTorch, safetensors and IREE are **conversion/verification dependencies**, not part of the intended deployed Vulkan runtime.
+
+The real checkpoint has **not yet been run through this gate**. Trained-weight compilation, numerics across multiple shapes, AMD GPU execution and throughput remain to be verified. Completion of Stage 2 does not imply complete CorridorKey inference: Stage 1 recurrent/temporal behavior, active C-RADIO/MoGe/RVM paths, hint carry, foreground/alpha reconstruction, HDR and scheduling behavior require independent end-to-end validation.
+
