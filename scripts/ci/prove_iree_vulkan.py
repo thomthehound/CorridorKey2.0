@@ -63,19 +63,25 @@ def cases():
     }
 
 
-class FlatOutput(torch.nn.Module):
-    """Serialize the source module's complete output as a contiguous tensor.
+class ChannelFirstRMSNormLowering(torch.nn.Module):
+    """An exact channel-axis formulation of upstream LayerNorm2d.
 
-    Shape is retained in the source-side reference; flattening is an output
-    buffer ABI representation, not a change to the model's computation.
+    The learned parameters and normalization epsilon are reused. This avoids
+    IREE's incorrect Vulkan materialization of NCHW <- NHWC results for
+    larger output shapes. The original module supplies the numerical reference.
     """
 
     def __init__(self, source):
         super().__init__()
-        self.source = source
+        self.weight = source.weight
+        self.eps = source.eps
 
     def forward(self, x):
-        return self.source(x).reshape(-1)
+        work = x.float() if x.dtype in (torch.float16, torch.bfloat16) else x
+        epsilon = torch.finfo(x.dtype).eps if self.eps is None else self.eps
+        inv = torch.rsqrt(work.square().mean(dim=1, keepdim=True) + epsilon)
+        y = (work * inv).to(x.dtype)
+        return y * self.weight.to(x.dtype).view(1, -1, 1, 1)
 
 
 def prepare(name: str):
@@ -92,13 +98,20 @@ def prepare(name: str):
     if name.startswith("rmsnorm"):
         with torch.no_grad():
             model.weight.copy_(torch.linspace(0.6, 1.4, 16))
-    if name == "rmsnorm2d":
-        model = FlatOutput(model).eval()
     sample = torch.randn(shape, dtype=torch.float32)
     with torch.inference_mode():
         expected = model(sample).detach().numpy()
     if not np.isfinite(expected).all() or np.max(np.abs(expected)) == 0:
         raise AssertionError(f"{name}: invalid or trivial reference")
+    if name == "rmsnorm2d":
+        lowered = ChannelFirstRMSNormLowering(model).eval()
+        with torch.inference_mode():
+            lowered_reference = lowered(sample).detach().numpy()
+        np.testing.assert_allclose(
+            lowered_reference, expected, atol=1.0e-6, rtol=1.0e-6,
+            err_msg="Channel-first RMSNorm lowering changed source semantics",
+        )
+        model = lowered
     return model, sample, expected
 
 
@@ -202,7 +215,9 @@ def execute_vulkan(binary: Path, sample: torch.Tensor) -> np.ndarray:
 def run_case(name: str, directory: Path, run_vulkan: bool, target: str) -> dict:
     directory.mkdir(parents=True, exist_ok=True)
     status = {"case": name, "export": False, "compile": False,
-              "vulkan_execute": False, "vulkan_requested": run_vulkan}
+              "vulkan_execute": False, "vulkan_requested": run_vulkan,
+              "legalization": ("channel-axis RMSNorm (NCHW)" if name == "rmsnorm2d"
+                                else "standard import legalization")}
     model, sample, expected = prepare(name)
     np.save(directory / "reference.npy", expected)
     exported = torch.export.export(model, (sample,), strict=True)
