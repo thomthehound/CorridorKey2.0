@@ -159,9 +159,27 @@ class ChannelLastResult(torch.nn.Module):
         return self.source(x).permute(0, 2, 3, 1).contiguous()
 
 
+def verify_cswin_layout_equivalence():
+    """Prove head-wise gating commutes with stripe flatten/concatenation."""
+    generator = torch.Generator().manual_seed(2731)
+    a = torch.randn(2, 3, 4, 2, 12, generator=generator)
+    b = torch.randn(2, 3, 4, 2, 12, generator=generator)
+    gate = torch.sigmoid(torch.randn(2, 3, 4, 4, 1, generator=generator))
+    original = (torch.cat([a, b], dim=-2) * gate).reshape(2, 3, 4, 48)
+    gate_a, gate_b = gate.split((2, 2), dim=-2)
+    flattened = torch.cat(
+        [(a * gate_a).reshape(2, 3, 4, 24),
+         (b * gate_b).reshape(2, 3, 4, 24)],
+        dim=-1,
+    )
+    torch.testing.assert_close(original, flattened, atol=0.0, rtol=0.0)
+
+
 def prepare(name: str):
     make, shape = cases()[name]
     torch.manual_seed(1937)
+    if name == "cswin2d-stage2":
+        verify_cswin_layout_equivalence()
     model = make().eval()
     # Upstream initializes several residual projections to zero. Change only
     # those initial weights for this random-weight structural test so an
