@@ -90,9 +90,23 @@ def main():
     ap.add_argument("--corridorkey_revision", default=None)
     ap.add_argument("--skip_corridorkey", action="store_true",
                     help="Only fetch the third-party foundation models.")
+    ap.add_argument(
+        "--stage2_checkpoint_only", action="store_true",
+        help="Download only CorridorKey's runtime safetensors for native Stage2 "
+             "checkpoint validation (no foundation models or statistics).",
+    )
     args = ap.parse_args()
 
     root = Path(args.package_root).resolve()
+    if args.stage2_checkpoint_only:
+        if args.skip_corridorkey:
+            ap.error("--stage2_checkpoint_only conflicts with --skip_corridorkey")
+        target = hf_hub_download(
+            args.corridorkey_repo, "corridorkey_v2.safetensors",
+            revision=args.corridorkey_revision, local_dir=root / "weights",
+        )
+        print(f"Runtime checkpoint ready: {target}")
+        return
     if not args.skip_corridorkey:
         download_corridorkey(root, args.corridorkey_repo, args.corridorkey_revision)
     download_cradio(root)
