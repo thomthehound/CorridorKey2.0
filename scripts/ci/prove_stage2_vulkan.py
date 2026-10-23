@@ -115,11 +115,43 @@ def export_stage2(model, rgb, baton):
             raise ValueError(f"Unexpected Stage2 geometry signature {args}")
         return signatures[args]
 
+    # In eval, RoPE tables depend on the shape profile, not on source
+    # pixels. Bake the ORIGINAL implementation's CPU tables into module
+    # buffers and lift them as read-only constants during export. This
+    # avoids re-evaluating trig functions on the GPU for every attention
+    # layer and retains the exact reference angle convention.
+    from corridorkey.rope import RoPE2D
+
+    original_rope = RoPE2D.get_cos_sin
+    rope_shapes = ((height, width), (window, window),
+                   (height, 1), (1, width))
+    unique_rope_modules = {
+        id(module): module for module in source.modules()
+        if isinstance(module, RoPE2D)
+    }
+    if not unique_rope_modules:
+        raise AssertionError("Stage2 RoPE modules are missing")
+    for rope in unique_rope_modules.values():
+        for h, w in rope_shapes:
+            cos, sin = original_rope(rope, h, w, device=torch.device("cpu"))
+            rope.register_buffer(f"_aot_cos_{h}_{w}", cos.detach().clone(),
+                                 persistent=False)
+            rope.register_buffer(f"_aot_sin_{h}_{w}", sin.detach().clone(),
+                                 persistent=False)
+
+    def static_rope(self, num_h, num_w, device=None, h_offset=0, w_offset=0):
+        if (num_h, num_w) not in rope_shapes:
+            raise ValueError(f"RoPE shape {(num_h, num_w)} not specialized")
+        return (getattr(self, f"_aot_cos_{num_h}_{num_w}"),
+                getattr(self, f"_aot_sin_{num_h}_{num_w}"))
+
     blocks._shifted_region_groups_2d_cached = specialize
+    RoPE2D.get_cos_sin = static_rope
     try:
         exported = torch.export.export(model, (rgb, baton), strict=True)
     finally:
         blocks._shifted_region_groups_2d_cached = original
+        RoPE2D.get_cos_sin = original_rope
 
     exported = exported.run_decompositions({
         torch.ops.aten.scaled_dot_product_attention.default: _sdpa_inference_math,
@@ -173,9 +205,7 @@ def main() -> int:
         print("[stage2] exported complete Stage2 graph to MLIR", flush=True)
 
         compiled.session.set_flags(f"--iree-vulkan-target={args.target}")
-        # Diagnose Vulkan numerical divergence under the more aggressive
-        # optimization pipeline. Do not alter source model or tolerances.
-        compiled.session.set_flags("--iree-opt-level=O1")
+        compiled.session.set_flags("--iree-opt-level=O2")
         vmfb = args.output / "stage2.vmfb"
         compiled.compile(save_to=vmfb, target_backends=["vulkan-spirv"])
         if not vmfb.is_file() or vmfb.stat().st_size < 100:
