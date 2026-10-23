@@ -49,6 +49,16 @@ def cases():
             lambda: RMSNorm(16),
             (1, 4, 4, 16),
         ),
+        # Stage1's exact normalization operand ranks/dimensions; these
+        # distinguish a fundamental RMSNorm error from fused graph codegen.
+        "rmsnorm-stage1-tokens": (
+            lambda: RMSNorm(64),
+            (1, 2, 4, 4, 64),
+        ),
+        "rmsnorm-stage1-head": (
+            lambda: RMSNorm(16),
+            (2, 4, 16, 16),
+        ),
         "rmsnorm2d-small": (
             lambda: LayerNorm2d(num_channels=16),
             (1, 16, 2, 2),
