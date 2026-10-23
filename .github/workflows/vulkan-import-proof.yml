@@ -6,14 +6,14 @@ on:
       - amd/native-inference
     paths:
       - ".github/workflows/vulkan-import-proof.yml"
-      - "scripts/ci/prove_iree_vulkan.py"
+      - "scripts/ci/**"
       - "corridorkey/**"
   pull_request:
     branches:
       - amd/native-inference
     paths:
       - ".github/workflows/vulkan-import-proof.yml"
-      - "scripts/ci/prove_iree_vulkan.py"
+      - "scripts/ci/**"
       - "corridorkey/**"
   workflow_dispatch:
 
@@ -50,6 +50,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install "torch==2.9.1" --index-url https://download.pytorch.org/whl/cpu
           python -m pip install "iree-turbine==3.9.0" "numpy>=1.26,<2"
+
+      - name: Validate versioned checkpoint metadata contract
+        shell: bash
+        run: python scripts/ci/inspect_checkpoint.py --self-test
 
       - name: Install software Vulkan device (Linux)
         if: runner.os == 'Linux'
