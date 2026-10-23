@@ -59,13 +59,31 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          timeout 120s sudo apt-get update \
-            -o Acquire::Retries=2 -o Acquire::http::Timeout=20 \
-            -o Acquire::https::Timeout=20
-          timeout 180s sudo apt-get install -y --no-install-recommends \
-            -o Acquire::Retries=2 -o Acquire::http::Timeout=20 \
-            -o Acquire::https::Timeout=20 \
-            libvulkan1 mesa-vulkan-drivers vulkan-tools
+          # GitHub's Azure mirror can stall mid-download. Prefer the
+          # primary Ubuntu archive and retain a fallback for transient errors.
+          set_ubuntu_mirror() {
+            local host="$1"
+            for file in /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
+              if [ -f "$file" ]; then
+                sudo sed -i -E "s#(https?://)(azure\\.archive\\.ubuntu\\.com|us\\.archive\\.ubuntu\\.com|archive\\.ubuntu\\.com)/ubuntu#\\1${host}/ubuntu#g" "$file"
+              fi
+            done
+          }
+          apt_install() {
+            timeout 120s sudo apt-get update \
+              -o Acquire::Retries=1 -o Acquire::http::Timeout=15 \
+              -o Acquire::https::Timeout=15
+            timeout 120s sudo apt-get install -y --no-install-recommends \
+              -o Acquire::Retries=1 -o Acquire::http::Timeout=15 \
+              -o Acquire::https::Timeout=15 \
+              libvulkan1 mesa-vulkan-drivers vulkan-tools
+          }
+          set_ubuntu_mirror archive.ubuntu.com
+          if ! apt_install; then
+            echo "::warning::Primary Ubuntu mirror failed; trying US archive mirror"
+            set_ubuntu_mirror us.archive.ubuntu.com
+            apt_install
+          fi
           icd=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)
           test -n "$icd" || { echo "::error::Mesa lavapipe Vulkan ICD not found"; exit 1; }
           echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
