@@ -52,7 +52,10 @@ def grouped_sdpa_contiguous(
             window_index[:, None] * tokens + token_index[None, :]
         ).reshape(-1)
         rows = result.permute(0, 2, 1, 3).reshape(-1, heads, head_dim)
-        out_flat.index_copy_(0, row_index, rows)
+        # Write to the contiguous first dimension; unlike index_copy,
+        # aten.index_put is legalizable by the pinned IREE importer. The
+        # original GPU failure involved index_put through a transposed view.
+        out_flat[row_index] = rows
 
     if full_idx:
         windows = batched_windows(full_idx)
