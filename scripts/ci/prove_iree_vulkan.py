@@ -63,25 +63,19 @@ def cases():
     }
 
 
-class ChannelFirstRMSNormLowering(torch.nn.Module):
-    """An exact channel-axis formulation of upstream LayerNorm2d.
+class ChannelLastResult(torch.nn.Module):
+    """Expose the source operator's NCHW result in NHWC GPU tensor layout.
 
-    The learned parameters and normalization epsilon are reused. This avoids
-    IREE's incorrect Vulkan materialization of NCHW <- NHWC results for
-    larger output shapes. The original module supplies the numerical reference.
+    The original numerical result is reconstructed at the API boundary. This
+    avoids materializing a transposed NCHW output inside the Vulkan graph.
     """
 
     def __init__(self, source):
         super().__init__()
-        self.weight = source.weight
-        self.eps = source.eps
+        self.source = source
 
     def forward(self, x):
-        work = x.float() if x.dtype in (torch.float16, torch.bfloat16) else x
-        epsilon = torch.finfo(x.dtype).eps if self.eps is None else self.eps
-        inv = torch.rsqrt(work.square().mean(dim=1, keepdim=True) + epsilon)
-        y = (work * inv).to(x.dtype)
-        return y * self.weight.to(x.dtype).view(1, -1, 1, 1)
+        return self.source(x).permute(0, 2, 3, 1).contiguous()
 
 
 def prepare(name: str):
@@ -104,12 +98,12 @@ def prepare(name: str):
     if not np.isfinite(expected).all() or np.max(np.abs(expected)) == 0:
         raise AssertionError(f"{name}: invalid or trivial reference")
     if name == "rmsnorm2d":
-        lowered = ChannelFirstRMSNormLowering(model).eval()
+        lowered = ChannelLastResult(model).eval()
         with torch.inference_mode():
-            lowered_reference = lowered(sample).detach().numpy()
+            lowered_reference = lowered(sample).permute(0, 3, 1, 2).numpy()
         np.testing.assert_allclose(
             lowered_reference, expected, atol=1.0e-6, rtol=1.0e-6,
-            err_msg="Channel-first RMSNorm lowering changed source semantics",
+            err_msg="Channel-last graph output changed source semantics",
         )
         model = lowered
     return model, sample, expected
@@ -225,7 +219,7 @@ def run_case(name: str, directory: Path, run_vulkan: bool, target: str) -> dict:
     directory.mkdir(parents=True, exist_ok=True)
     status = {"case": name, "export": False, "compile": False,
               "vulkan_execute": False, "vulkan_requested": run_vulkan,
-              "legalization": ("channel-axis RMSNorm (NCHW)" if name == "rmsnorm2d"
+              "legalization": ("NHWC GPU output, NCHW API semantics" if name == "rmsnorm2d"
                                 else "standard import legalization")}
     model, sample, expected = prepare(name)
     np.save(directory / "reference.npy", expected)
@@ -263,6 +257,10 @@ def run_case(name: str, directory: Path, run_vulkan: bool, target: str) -> dict:
 
     if run_vulkan:
         actual = execute_vulkan(vmfb_path, sample)
+        if name == "rmsnorm2d":
+            if actual.shape != (1, expected.shape[2], expected.shape[3], expected.shape[1]):
+                raise AssertionError(f"unexpected channel-last GPU output {actual.shape}")
+            actual = actual.transpose(0, 3, 1, 2).copy()
         if actual.shape != expected.shape:
             raise AssertionError(
                 f"shape mismatch: Vulkan {actual.shape}; PyTorch {expected.shape}"
