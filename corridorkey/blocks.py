@@ -1990,9 +1990,16 @@ class CSwinAttention2D(nn.Module):
                         .permute(0, 1, 3, 2, 4)
                         .contiguous())
 
-        attn = torch.cat([attn_h, attn_w], dim=-2)
-        attn = attn * self.attn_gate.grid(x, dtype=attn.dtype)
-        attn = attn.reshape(B, H, W, C)
+        # Apply each head's gate before flattening its stripe group.
+        # This is algebraically identical to gated concatenation in
+        # (B,H,W,heads,head_dim), but keeps the concatenation and final
+        # projection in the natural NHWC buffer layout. It also avoids
+        # materializing a high-rank concatenation followed by reshape.
+        gate_h, gate_w = self.attn_gate.grid(
+            x, dtype=attn_h.dtype).split((h_heads, w_heads), dim=-2)
+        attn_h = (attn_h * gate_h).reshape(B, H, W, h_heads * D)
+        attn_w = (attn_w * gate_w).reshape(B, H, W, w_heads * D)
+        attn = torch.cat([attn_h, attn_w], dim=-1)
         return self.proj(attn)
 
 
