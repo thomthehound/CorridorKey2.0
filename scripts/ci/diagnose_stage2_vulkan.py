@@ -30,7 +30,12 @@ from prove_stage2_vulkan import create_stage2, export_stage2
 SITES = (
     ("patchify", "patch_1", (1, 32, 2, 2)),
     ("pre_block_0", "pre_blocks.0", (1, 2, 2, 48)),
+    ("pre_block_1", "pre_blocks.1", (1, 2, 2, 48)),
+    ("pre_block_2_norm1", "pre_blocks.2.norm1", (1, 2, 2, 48)),
+    ("pre_block_2_attention", "pre_blocks.2.attn", (1, 2, 2, 48)),
+    ("pre_block_2", "pre_blocks.2", (1, 2, 2, 48)),
     ("pre_block_3", "pre_blocks.3", (1, 2, 2, 48)),
+    ("pre_block_4", "pre_blocks.4", (1, 2, 2, 48)),
     ("pre_block_5", "pre_blocks.5", (1, 2, 2, 48)),
     ("final_block_0", "final_blocks.0", (1, 2, 2, 48)),
     ("final_block_1", "final_blocks.1", (1, 2, 2, 48)),
