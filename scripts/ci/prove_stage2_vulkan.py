@@ -25,8 +25,8 @@ from prove_iree_vulkan import (
     _read_device_result,
     _rms_norm_inference_math,
     _sdpa_inference_math,
+    GeometryMaskSwin2DAttention,
 )
-from iree_vulkan_legalizations import grouped_sdpa_masked
 
 
 class ChannelLastStage2Result(torch.nn.Module):
@@ -151,21 +151,36 @@ def export_stage2(model, rgb, baton):
     # not a modification to the learned network.
     with torch.inference_mode():
         source_result = model(rgb, baton).detach().cpu().numpy()
-    original_grouped = blocks._sdpa_with_region_groups
+    # Store the immutable source-derived mask as an actual module buffer.
+    # Inlining torch.tensor(nested_list) per attention call triggers an IREE
+    # tensor-literal type verification failure in the full Stage2 graph.
+    # The wrapper changes only the graph representation of each shifted
+    # attention mask, retaining the source Q/K/V, head gate and projections.
+    saved_attentions = []
+    for block in [*source.pre_blocks, *source.final_blocks]:
+        if not hasattr(block, "shift_h") or not (block.shift_h or block.shift_w):
+            continue
+        attention = block.attn
+        block.attn = GeometryMaskSwin2DAttention(
+            attention, (rgb.shape[0] * rgb.shape[1], height, width, source.d),
+            window, (block.shift_h, block.shift_w),
+        )
+        saved_attentions.append((block, attention))
+
     blocks._shifted_region_groups_2d_cached = specialize
-    blocks._sdpa_with_region_groups = grouped_sdpa_masked
     RoPE2D.get_cos_sin = static_rope
     try:
         with torch.inference_mode():
             lowered_result = model(rgb, baton).detach().cpu().numpy()
         np.testing.assert_allclose(
             lowered_result, source_result, atol=1e-6, rtol=1e-6,
-            err_msg="Masked region attention changed source Stage2",
+            err_msg="Static shifted-region mask changed source Stage2",
         )
         exported = torch.export.export(model, (rgb, baton), strict=True)
     finally:
+        for block, attention in saved_attentions:
+            block.attn = attention
         blocks._shifted_region_groups_2d_cached = original
-        blocks._sdpa_with_region_groups = original_grouped
         RoPE2D.get_cos_sin = original_rope
 
     exported = exported.run_decompositions({
