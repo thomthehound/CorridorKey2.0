@@ -125,12 +125,14 @@ Vulkan/SPIR-V is the **GPU** target, not a portable NPU driver. The shared MLIR 
 
 The `.github/workflows/vulkan-import-proof.yml` workflow imports actual source modules from `corridorkey.blocks` using isolated CPU-side PyTorch, compiles the graphs to `vulkan-spirv` with IREE, and preserves MLIR, compiled VMFB and structured reference-output artifacts. Windows checks RDNA1-targeted compilation; Ubuntu 24.04 executes through Mesa llvmpipe and numerically compares device outputs to the unchanged source reference. This validates the compilation and GPU execution *semantics* for exercised graphs; it does not constitute an AMD hardware performance test.
 
-The proof currently exercises eleven configurations:
+The proof currently exercises eighteen configurations:
 - RMSNorm with channel-first, channel-last and small NCHW output shapes
 - SwiGLU
 - Full-spatial and full-spatiotemporal attention
 - Three shifted Swin-2D variants (diagonal, row, column), including padded boundaries and multi-batch routing
 - Two shifted Swin-3D variants, including padded, multi-frame and multi-batch region routing
+- Full-spatial, CSwin, and shifted-Swin blocks at the reduced Stage 2 token layout
+- Native patchification and depatchification, each with non-overlapping and overlapping convolution kernels
 
 The source-derived 2D shifted-region cache uses CPU indexing and grouped scatter unsuitable for static graph capture. The importer specializes shape-dependent cached groups, then exposes them as a constant boolean mask on the existing Swin attention module. It numerically verifies the legalized module before exporting it. This is a proof of correctness for modest attention windows; dense quadratic masks are **not** the production strategy for long temporal windows. The 3D proof instead retains the original grouped gather/scatter implementation and specializes only the geometry cache; both compilation and software-Vulkan numerical execution succeed on the tested shapes.
 
@@ -149,6 +151,8 @@ Other observed importer requirements:
 
 Only model-independent geometry caches are specialized at import time; all learned modules and their weights remain source-authored. The test compares three values independently: original PyTorch Stage 2, the exported/decomposed graph run on CPU, and Vulkan SPIR-V execution through llvmpipe. RDNA-targeted compilation is checked separately on Windows.
 
-The initial integrated graph **successfully exports, compiles and executes** but Vulkan differs from its source reference at a small subset of output elements (maximum absolute deviation ~0.00355 over 4096 values at the initial reduced test shape); the CPU exported graph matches the original. Thus the integrated correctness gate correctly remains failing until the Vulkan discrepancy is characterized and repaired, not hidden by relaxed acceptance tolerances. The adjacent subgraph probes for original Stage 2 full-spatial, CSwin and shifted-Swin blocks are intended to isolate this issue.
+The integrated graph **successfully exports, compiles and executes**, while its CPU-exported form agrees with the source reference. The first Vulkan graph differed at nine of 4096 output values (maximum absolute error approximately 0.00355). Flattening CSwin's stripe-head layout before concatenation preserved the original arithmetic and corrected the separate CSwin source-block regression; the integrated graph now has two values outside its fixed output tolerance (maximum absolute error approximately 0.00325). Static RoPE tables, a channel-last result ABI, and changing the IREE optimization level did not eliminate these two differences. The source-element numerical gate therefore still fails.
+
+The importer additionally checks original patch/depatchify and three spatial transformer families in Vulkan against source results. `scripts/ci/diagnose_stage2_vulkan.py` instruments boundaries in the **existing exported graph** to compare intermediate tensors against software Vulkan and locate the first meaningful divergence. When the integrated gate fails on Linux, CI executes this diagnostic and preserves its tensor samples and report, without suppressing the failure or relaxing the acceptance tolerance.
 
 These source-topology tests are a necessary intermediate milestone, not a claim of production checkpoint compatibility. A complete production proof still requires actual 1280-channel Stage 2 weights, the active foundation models, Stage 1's real recurrent and temporal semantics, and hardware AMD performance measurements.
