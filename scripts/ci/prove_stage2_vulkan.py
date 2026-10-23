@@ -28,6 +28,21 @@ from prove_iree_vulkan import (
 )
 
 
+class ChannelLastStage2Result(torch.nn.Module):
+    """Expose Stage2's B,T,C,H,W tensor via a Vulkan-friendly B,T,H,W,C ABI.
+
+    The authoritative source model remains unchanged. The caller reconstructs
+    the original channel-first output before comparing or consuming it.
+    """
+
+    def __init__(self, stage2):
+        super().__init__()
+        self.stage2 = stage2
+
+    def forward(self, rgb, baton):
+        return self.stage2(rgb, baton).permute(0, 1, 3, 4, 2).contiguous()
+
+
 def create_stage2():
     from corridorkey.stage2 import Stage2
 
@@ -70,7 +85,7 @@ def create_stage2():
         raise AssertionError(f"Unexpected Stage2 source output {reference.shape}")
     if not np.isfinite(reference).all() or reference.std() < 1e-4:
         raise AssertionError("Stage2 reference is non-finite or trivial")
-    return model, rgb, baton, reference
+    return ChannelLastStage2Result(model).eval(), rgb, baton, reference
 
 
 def export_stage2(model, rgb, baton):
@@ -80,12 +95,13 @@ def export_stage2(model, rgb, baton):
     # Evaluate the existing upstream geometry cache on CPU, then specialize
     # the *cache lookup*, not the model's attention or learned weights.
     original = blocks._shifted_region_groups_2d_cached
-    window = model.window_size
+    source = model.stage2
+    window = source.window_size
     height, width = rgb.shape[-2] // 16, rgb.shape[-1] // 16
     pad_h = ((height + window - 1) // window) * window
     pad_w = ((width + window - 1) // window) * window
     signatures = {}
-    for block in [*model.pre_blocks, *model.final_blocks]:
+    for block in [*source.pre_blocks, *source.final_blocks]:
         if hasattr(block, "shift_h") and (block.shift_h or block.shift_w):
             sig = (height, width, pad_h, pad_w, window,
                    block.shift_h, block.shift_w)
@@ -142,6 +158,7 @@ def main() -> int:
         status["geometry_signatures"] = profile_count
         with torch.inference_mode():
             imported_output = exported.module()(rgb, baton).detach().cpu().numpy()
+            imported_output = imported_output.transpose(0, 1, 4, 2, 3).copy()
         np.save(args.output / "exported_cpu_output.npy", imported_output)
         cpu_diff = np.abs(imported_output - expected)
         status["export_max_absolute_error"] = float(cpu_diff.max())
@@ -179,6 +196,9 @@ def main() -> int:
                     raise AssertionError("Stage2 should return one output tensor")
                 output = output[0]
             actual = _read_device_result(config, output)
+            if actual.shape != (1, 1, 32, 32, 4):
+                raise AssertionError(f"Unexpected Stage2 GPU ABI shape: {actual.shape}")
+            actual = actual.transpose(0, 1, 4, 2, 3).copy()
             np.save(args.output / "vulkan_output.npy", actual)
             if actual.shape != expected.shape:
                 raise AssertionError(f"shape mismatch {actual.shape} vs {expected.shape}")
