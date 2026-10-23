@@ -86,6 +86,11 @@ def cases():
                                 window_W=4, shift=(2, 2)),
             (1, 2, 5, 7, 16),
         ),
+        "swin3d-shift-batched": (
+            lambda: SwinBlock3D(dim=16, num_heads=2, window_H=4,
+                                window_W=4, shift=(2, 0)),
+            (2, 3, 5, 7, 16),
+        ),
     }
 
 
