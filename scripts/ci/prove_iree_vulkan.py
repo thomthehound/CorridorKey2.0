@@ -92,7 +92,7 @@ def execute_vulkan(binary: Path, sample: torch.Tensor) -> np.ndarray:
     return np.asarray(output.to_host())
 
 
-def run_case(name: str, directory: Path, run_vulkan: bool) -> dict:
+def run_case(name: str, directory: Path, run_vulkan: bool, target: str) -> dict:
     directory.mkdir(parents=True, exist_ok=True)
     status = {"case": name, "export": False, "compile": False,
               "vulkan_execute": False, "vulkan_requested": run_vulkan}
@@ -108,6 +108,7 @@ def run_case(name: str, directory: Path, run_vulkan: bool) -> dict:
     print(f"[{name}] imported real CorridorKey module to MLIR", flush=True)
 
     vmfb_path = directory / "vulkan.vmfb"
+    output.session.set_flags(f"--iree-vulkan-target={target}")
     output.compile(save_to=vmfb_path, target_backends=["vulkan-spirv"])
     if not vmfb_path.is_file() or vmfb_path.stat().st_size < 100:
         raise AssertionError("Vulkan binary was empty")
@@ -137,13 +138,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--execute-vulkan", action="store_true")
+    parser.add_argument("--vulkan-target", required=True,
+                        help="IREE Vulkan target (e.g. llvmpipe, rdna1)")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     report = {
         "python": platform.python_version(),
         "torch": torch.__version__,
         "platform": platform.platform(),
-        "target": "vulkan-spirv",
+        "target": f"vulkan-spirv ({args.vulkan_target})",
         "vulkan_execution_requested": args.execute_vulkan,
         "scope": "upstream source-module graph proof; not full-model inference",
         "cases": [],
@@ -151,7 +154,8 @@ def main() -> int:
     failure = False
     for name in cases():
         try:
-            status = run_case(name, args.output / name, args.execute_vulkan)
+            status = run_case(name, args.output / name,
+                              args.execute_vulkan, args.vulkan_target)
         except Exception as e:
             status = {"case": name, "failed": True,
                       "error": f"{type(e).__name__}: {e}",
