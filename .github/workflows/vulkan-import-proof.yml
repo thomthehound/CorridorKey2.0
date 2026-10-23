@@ -8,7 +8,6 @@ on:
       - ".github/workflows/vulkan-import-proof.yml"
       - "scripts/ci/prove_iree_vulkan.py"
       - "corridorkey/**"
-      - "docs/amd-native-inference-plan.md"
   pull_request:
     branches:
       - amd/native-inference
@@ -16,7 +15,6 @@ on:
       - ".github/workflows/vulkan-import-proof.yml"
       - "scripts/ci/prove_iree_vulkan.py"
       - "corridorkey/**"
-      - "docs/amd-native-inference-plan.md"
   workflow_dispatch:
 
 permissions:
