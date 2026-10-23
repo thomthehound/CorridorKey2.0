@@ -173,7 +173,9 @@ def main() -> int:
         print("[stage2] exported complete Stage2 graph to MLIR", flush=True)
 
         compiled.session.set_flags(f"--iree-vulkan-target={args.target}")
-        compiled.session.set_flags("--iree-opt-level=O2")
+        # Diagnose Vulkan numerical divergence under the more aggressive
+        # optimization pipeline. Do not alter source model or tolerances.
+        compiled.session.set_flags("--iree-opt-level=O1")
         vmfb = args.output / "stage2.vmfb"
         compiled.compile(save_to=vmfb, target_backends=["vulkan-spirv"])
         if not vmfb.is_file() or vmfb.stat().st_size < 100:
