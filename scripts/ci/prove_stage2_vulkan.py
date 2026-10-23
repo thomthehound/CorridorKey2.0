@@ -26,6 +26,7 @@ from prove_iree_vulkan import (
     _rms_norm_inference_math,
     _sdpa_inference_math,
 )
+from iree_vulkan_legalizations import grouped_sdpa_contiguous
 
 
 class ChannelLastStage2Result(torch.nn.Module):
@@ -145,12 +146,26 @@ def export_stage2(model, rgb, baton):
         return (getattr(self, f"_aot_cos_{num_h}_{num_w}"),
                 getattr(self, f"_aot_sin_{num_h}_{num_w}"))
 
+    # Capture the authoritative CPU output before changing the temporary
+    # import-time group-scatter operator. This is a differential lowering,
+    # not a modification to the learned network.
+    with torch.inference_mode():
+        source_result = model(rgb, baton).detach().cpu().numpy()
+    original_grouped = blocks._sdpa_with_region_groups
     blocks._shifted_region_groups_2d_cached = specialize
+    blocks._sdpa_with_region_groups = grouped_sdpa_contiguous
     RoPE2D.get_cos_sin = static_rope
     try:
+        with torch.inference_mode():
+            lowered_result = model(rgb, baton).detach().cpu().numpy()
+        np.testing.assert_allclose(
+            lowered_result, source_result, atol=1e-6, rtol=1e-6,
+            err_msg="Contiguous grouped attention changed source Stage2",
+        )
         exported = torch.export.export(model, (rgb, baton), strict=True)
     finally:
         blocks._shifted_region_groups_2d_cached = original
+        blocks._sdpa_with_region_groups = original_grouped
         RoPE2D.get_cos_sin = original_rope
 
     exported = exported.run_decompositions({
