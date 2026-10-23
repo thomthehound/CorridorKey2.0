@@ -176,6 +176,15 @@ def _read_device_result(config, result) -> np.ndarray:
     import iree.runtime as ireert
 
     source = result._buffer_view.get_buffer()
+    tensor_bytes = int(np.prod(result.shape)) * np.dtype(result.dtype).itemsize
+    source_bytes = source.byte_length()
+    print(f"[readback] logical_bytes={tensor_bytes}, physical_bytes={source_bytes}, "
+          f"shape={result.shape}, dtype={result.dtype}", flush=True)
+    if source_bytes < tensor_bytes:
+        raise AssertionError(
+            f"Result device buffer is smaller than declared tensor: "
+            f"{source_bytes} < {tensor_bytes} bytes"
+        )
     mem_type = int(ireert.MemoryType.HOST_LOCAL | ireert.MemoryType.DEVICE_VISIBLE)
     usage = int(ireert.BufferUsage.TRANSFER_TARGET | ireert.BufferUsage.MAPPING_SCOPED)
     staging = config.device.allocator.allocate_buffer(
