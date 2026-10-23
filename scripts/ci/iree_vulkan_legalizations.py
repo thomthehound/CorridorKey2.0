@@ -48,13 +48,14 @@ def grouped_sdpa_contiguous(
     total_windows, heads, tokens, head_dim = q.shape
     batch_windows = total_windows // num_windows
 
-    # Route positions are source-geometry constants for a compiled shape
-    # profile. The initial full-window zero region represents unassigned
-    # padding tokens. Using a regular window-sized allocation also avoids
-    # an irregular one-row vector constant in the Vulkan software backend.
+    # Work in linear scalar storage. A one-element zero sentinel represents
+    # padding tokens that the source leaves unassigned. Indexing each
+    # scalar avoids materializing irregular vector-valued zero constants
+    # that llvmpipe's SPIR-V translation cannot legalize for small grids.
+    row_width = heads * head_dim
     route = [0] * (total_windows * tokens)
-    pieces = [q.new_zeros((tokens, heads, head_dim))]
-    cursor = tokens
+    pieces = [q.new_zeros((1,))]
+    cursor = 1
 
     def windows_for(base: tuple[int, ...]):
         # Window-major ordering is identical to _batched_windows upstream.
@@ -70,12 +71,12 @@ def grouped_sdpa_contiguous(
 
     def add_output(window_ids, token_ids, result):
         nonlocal cursor
-        rows = result.permute(0, 2, 1, 3).reshape(-1, heads, head_dim)
+        rows = result.permute(0, 2, 1, 3).reshape(-1)
         pieces.append(rows)
         for window in window_ids:
             for token in token_ids:
                 route[window * tokens + token] = cursor
-                cursor += 1
+                cursor += row_width
 
     if full_idx:
         window_ids, indices = windows_for(full_idx)
@@ -101,9 +102,14 @@ def grouped_sdpa_contiguous(
         add_output(window_ids, token_tuple, result)
 
     packed = torch.cat(pieces, dim=0)
-    output_rows = packed.index_select(
-        0, torch.tensor(route, device=q.device, dtype=torch.long),
+    scalar_route = [
+        (start + channel) if start else 0
+        for start in route
+        for channel in range(row_width)
+    ]
+    output_scalars = packed.index_select(
+        0, torch.tensor(scalar_route, device=q.device, dtype=torch.long),
     )
-    return output_rows.reshape(
+    return output_scalars.reshape(
         total_windows, tokens, heads, head_dim,
     ).permute(0, 2, 1, 3).contiguous()
