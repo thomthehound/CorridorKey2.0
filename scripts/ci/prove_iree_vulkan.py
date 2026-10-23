@@ -30,6 +30,8 @@ def cases():
         FullSpatialAttention2D,
         FullSpatialBlock2D,
         CSwinBlock2D,
+        PatchifyConv,
+        Depatchify,
         LayerNorm2d,
         RMSNorm,
         SwiGLU,
@@ -107,6 +109,27 @@ def cases():
             lambda: SwinBlock2D(dim=48, num_heads=4, window_size=4,
                                 shift=(2, 2)),
             (1, 2, 2, 48),
+        ),
+        # Original Stage2 image-to-token and token-to-image operators.
+        # Test nontrivial weights, not the zero-initialized image head.
+        "stage2-patchify": (
+            lambda: PatchifyConv(in_channels=3, out_channels=32, patch=16),
+            (1, 3, 32, 32),
+        ),
+        "stage2-depatchify": (
+            lambda: Depatchify(in_dim=48, out_channels=4, r=16,
+                               zero_init_all=False),
+            (1, 48, 2, 2),
+        ),
+        "stage2-patchify-overlap": (
+            lambda: PatchifyConv(in_channels=3, out_channels=32,
+                                 patch=16, overlap_mult=2),
+            (1, 3, 32, 32),
+        ),
+        "stage2-depatchify-overlap": (
+            lambda: Depatchify(in_dim=48, out_channels=4, r=16,
+                               zero_init_all=False, overlap_mult=2),
+            (1, 48, 2, 2),
         ),
     }
 
