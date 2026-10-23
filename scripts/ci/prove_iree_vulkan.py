@@ -29,6 +29,7 @@ def cases():
         FullAttention3D,
         FullSpatialAttention2D,
         LayerNorm2d,
+        RMSNorm,
         SwiGLU,
     )
 
@@ -36,6 +37,14 @@ def cases():
         "rmsnorm2d": (
             lambda: LayerNorm2d(num_channels=16),
             (1, 16, 4, 4),
+        ),
+        "rmsnorm-nhwc": (
+            lambda: RMSNorm(16),
+            (1, 4, 4, 16),
+        ),
+        "rmsnorm2d-small": (
+            lambda: LayerNorm2d(num_channels=16),
+            (1, 16, 2, 2),
         ),
         "swiglu": (
             lambda: SwiGLU(dim=16, zero_init_down=False),
@@ -65,7 +74,7 @@ def prepare(name: str):
         with torch.no_grad():
             torch.nn.init.normal_(model.proj.weight, std=0.03)
             torch.nn.init.normal_(model.proj.bias, std=0.01)
-    if name == "rmsnorm2d":
+    if name.startswith("rmsnorm"):
         with torch.no_grad():
             model.weight.copy_(torch.linspace(0.6, 1.4, 16))
     sample = torch.randn(shape, dtype=torch.float32)
@@ -219,6 +228,17 @@ def run_case(name: str, directory: Path, run_vulkan: bool, target: str) -> dict:
         if not np.isfinite(actual).all():
             raise AssertionError("non-finite Vulkan output")
         np.save(directory / "vulkan_output.npy", actual)
+        close = np.isclose(actual, expected, atol=2.0e-3, rtol=2.0e-3)
+        if not close.all():
+            failed_positions = np.argwhere(~close)
+            print(f"[{name}] {failed_positions.shape[0]} divergent values; "
+                  f"first 12 positions (actual, expected):", flush=True)
+            for position in failed_positions[:12]:
+                index = tuple(map(int, position))
+                print(f"  {index}: {actual[index]!r}, {expected[index]!r}",
+                      flush=True)
+            print(f"[{name}] output physical buffer bytes="
+                  f"{actual.nbytes}, shape={actual.shape}", flush=True)
         np.testing.assert_allclose(
             actual, expected, atol=2.0e-3, rtol=2.0e-3,
             err_msg=f"Vulkan output differs from CorridorKey reference ({name})"
