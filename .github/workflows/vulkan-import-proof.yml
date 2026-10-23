@@ -111,6 +111,15 @@ jobs:
             python scripts/ci/prove_stage2_vulkan.py --output build/stage2-proof --target rdna1
           fi
 
+      - name: Export complete Stage1 temporal graph
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            python scripts/ci/prove_stage1_vulkan.py --output build/stage1-proof --compile --execute-vulkan --target llvmpipe
+          else
+            python scripts/ci/prove_stage1_vulkan.py --output build/stage1-proof --compile --target rdna1
+          fi
+
       - name: Diagnose Stage2 numerical mismatch
         if: failure() && runner.os == 'Linux'
         shell: bash
@@ -126,5 +135,6 @@ jobs:
             build/vulkan-proof/
             build/stage2-proof/
             build/stage2-diagnostic/
+            build/stage1-proof/
           if-no-files-found: warn
           retention-days: 7
