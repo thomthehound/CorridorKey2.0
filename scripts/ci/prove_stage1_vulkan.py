@@ -87,6 +87,19 @@ def create_stage1():
                 torch.nn.init.normal_(item.mlp.w_down.weight, std=0.015)
                 if item.mlp.w_down.bias is not None:
                     torch.nn.init.normal_(item.mlp.w_down.bias, std=0.002)
+        # Activate the source's zero-initialized /64 -> /16 -> /64
+        # detour and decoder-upsample route; otherwise correctness of
+        # these genuine Stage1 stages is invisible to the final outputs.
+        torch.nn.init.normal_(model.mid_up.proj.weight, std=0.005)
+        if model.mid_up.proj.bias is not None:
+            torch.nn.init.normal_(model.mid_up.proj.bias, std=0.001)
+        torch.nn.init.normal_(model.mid_down.conv.weight, std=0.005)
+        if model.mid_down.conv.bias is not None:
+            torch.nn.init.normal_(model.mid_down.conv.bias, std=0.001)
+        torch.nn.init.normal_(model.up.proj.weight, std=0.005)
+        if model.up.proj.bias is not None:
+            torch.nn.init.normal_(model.up.proj.bias, std=0.001)
+        model.patch_late_skip_scale.fill_(0.25)
     rgb = torch.randn(1, 2, 3, 64, 64)
     hint = torch.rand(1, 2, 1, 64, 64)
     moge = torch.randn(1, 2, 24, 1, 1)
