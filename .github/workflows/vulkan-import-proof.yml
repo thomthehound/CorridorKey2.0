@@ -98,11 +98,22 @@ jobs:
             python scripts/ci/prove_iree_vulkan.py --output build/vulkan-proof --vulkan-target rdna1
           fi
 
+      - name: Compile complete CorridorKey Stage2 graph
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            python scripts/ci/prove_stage2_vulkan.py --output build/stage2-proof --execute-vulkan --target llvmpipe
+          else
+            python scripts/ci/prove_stage2_vulkan.py --output build/stage2-proof --target rdna1
+          fi
+
       - name: Publish proof report and compiler artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: vulkan-proof-${{ matrix.os }}
-          path: build/vulkan-proof/
+          path: |
+            build/vulkan-proof/
+            build/stage2-proof/
           if-no-files-found: warn
           retention-days: 7
