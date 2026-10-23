@@ -41,7 +41,17 @@ class ChannelLastStage2Result(torch.nn.Module):
         self.stage2 = stage2
 
     def forward(self, rgb, baton):
-        return self.stage2(rgb, baton).permute(0, 1, 3, 4, 2).contiguous()
+        output = self.stage2(rgb, baton)
+        if isinstance(output, tuple):
+            # The optional refinement head returns (refined, base).
+            return tuple(t.permute(0, 1, 3, 4, 2).contiguous()
+                         for t in output)
+        return output.permute(0, 1, 3, 4, 2).contiguous()
+
+
+def _output_arrays(output):
+    outputs = output if isinstance(output, (tuple, list)) else (output,)
+    return tuple(t.detach().cpu().numpy() for t in outputs)
 
 
 def create_stage2():
@@ -150,7 +160,7 @@ def export_stage2(model, rgb, baton):
     # import-time group-scatter operator. This is a differential lowering,
     # not a modification to the learned network.
     with torch.inference_mode():
-        source_result = model(rgb, baton).detach().cpu().numpy()
+        source_result = _output_arrays(model(rgb, baton))
     # Store the immutable source-derived mask as an actual module buffer.
     # Inlining torch.tensor(nested_list) per attention call triggers an IREE
     # tensor-literal type verification failure in the full Stage2 graph.
@@ -171,11 +181,16 @@ def export_stage2(model, rgb, baton):
     RoPE2D.get_cos_sin = static_rope
     try:
         with torch.inference_mode():
-            lowered_result = model(rgb, baton).detach().cpu().numpy()
-        np.testing.assert_allclose(
-            lowered_result, source_result, atol=1e-6, rtol=1e-6,
-            err_msg="Static shifted-region mask changed source Stage2",
-        )
+            lowered_result = _output_arrays(model(rgb, baton))
+        if len(lowered_result) != len(source_result):
+            raise AssertionError("Stage2 legalization changed output arity")
+        for index, (lowered, reference) in enumerate(
+            zip(lowered_result, source_result)
+        ):
+            np.testing.assert_allclose(
+                lowered, reference, atol=1e-6, rtol=1e-6,
+                err_msg=f"Static mask changed Stage2 output {index}",
+            )
         exported = torch.export.export(model, (rgb, baton), strict=True)
     finally:
         for block, attention in saved_attentions:
