@@ -1,11 +1,10 @@
-"""Source-equivalent grouped-SDPA lowering for Vulkan AOT compilation.
+"""Inference-only, source-equivalent region attention lowering for Vulkan.
 
-The original attention outputs are computed on exactly the same per-region
-Q/K/V tensors. Reassembly uses a compile-time geometry routing table and
-a contiguous gather instead of indexed writes through a tensor view.
-
-GPU working storage is linear in the number of output tokens, not quadratic
-in the attention window size. No model weights or group semantics change.
+CorridorKey's reference groups visible tokens within shifted windows and
+scatter-writes each group's SDPA result. The importer can instead represent
+the identical grouping as a shape-constant boolean attention mask. This is
+a correctness-oriented Stage2 import path, not the eventual high-performance
+implementation: large windows must use fused or explicitly grouped kernels.
 """
 
 from __future__ import annotations
@@ -14,20 +13,7 @@ import torch
 import torch.nn.functional as F
 
 
-
-def headwise_gate_contiguous(self, query_tokens: torch.Tensor,
-                             attn: torch.Tensor) -> torch.Tensor:
-    """Exact gate applied in token/head order, avoiding strided vector writes.
-
-    Source computes the same sigmoid gate and applies it to each attention
-    head through a heads-first view. Token-major scaling provides an
-    equivalent layout for the compiler, restoring source ordering afterward.
-    """
-    gate = torch.sigmoid(self.proj(query_tokens)).unsqueeze(-1)
-    return (attn.transpose(-3, -2) * gate).transpose(-3, -2).contiguous()
-
-
-def grouped_sdpa_contiguous(
+def grouped_sdpa_masked(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -35,81 +21,55 @@ def grouped_sdpa_contiguous(
     full_idx: tuple[int, ...],
     groups: tuple[tuple[tuple[int, ...], tuple[int, ...]], ...],
 ) -> torch.Tensor:
+    """Apply the source's exact region membership without indexed writes.
+
+    Only region geometry is specialized. Every participating query attends
+    to exactly the source's key set. Queries in padding-only positions
+    produce zero, as in the original preallocated output tensor.
+    """
     if num_windows <= 0:
         return F.scaled_dot_product_attention(
             q, k, v, dropout_p=0.0, is_causal=False,
         )
-    if q.shape[0] % num_windows != 0:
-        raise ValueError(
-            f"cached window count {num_windows} does not divide attention "
-            f"window batch {q.shape[0]}"
-        )
+    total, heads, tokens, head_dim = q.shape
+    if total % num_windows:
+        raise ValueError("Region window count does not divide attention batch")
+    batches = total // num_windows
 
-    total_windows, heads, tokens, head_dim = q.shape
-    batch_windows = total_windows // num_windows
-
-    # Work in linear scalar storage. A one-element zero sentinel represents
-    # padding tokens that the source leaves unassigned. Indexing each
-    # scalar avoids materializing irregular vector-valued zero constants
-    # that llvmpipe's SPIR-V translation cannot legalize for small grids.
-    row_width = heads * head_dim
-    route = [0] * (total_windows * tokens)
-    pieces = [q.new_zeros((1,))]
-    cursor = 1
-
-    def windows_for(base: tuple[int, ...]):
-        # Window-major ordering is identical to _batched_windows upstream.
-        window_ids = [
-            batch * num_windows + window
-            for batch in range(batch_windows)
-            for window in base
-        ]
-        return (
-            window_ids,
-            torch.tensor(window_ids, device=q.device, dtype=torch.long),
-        )
-
-    def add_output(window_ids, token_ids, result):
-        nonlocal cursor
-        rows = result.permute(0, 2, 1, 3).reshape(-1)
-        pieces.append(rows)
-        for window in window_ids:
-            for token in token_ids:
-                route[window * tokens + token] = cursor
-                cursor += row_width
-
-    if full_idx:
-        window_ids, indices = windows_for(full_idx)
-        result = F.scaled_dot_product_attention(
-            q.index_select(0, indices),
-            k.index_select(0, indices),
-            v.index_select(0, indices),
-            dropout_p=0.0, is_causal=False,
-        )
-        add_output(window_ids, range(tokens), result)
-
-    for token_tuple, window_tuple in groups:
-        window_ids, window_index = windows_for(window_tuple)
-        token_index = torch.tensor(
-            token_tuple, device=q.device, dtype=torch.long,
-        )
-        result = F.scaled_dot_product_attention(
-            q.index_select(0, window_index).index_select(2, token_index),
-            k.index_select(0, window_index).index_select(2, token_index),
-            v.index_select(0, window_index).index_select(2, token_index),
-            dropout_p=0.0, is_causal=False,
-        )
-        add_output(window_ids, token_tuple, result)
-
-    packed = torch.cat(pieces, dim=0)
-    scalar_route = [
-        (start + channel) if start else 0
-        for start in route
-        for channel in range(row_width)
+    # Static metadata from _shifted_region_groups_2d_cached. Materialize
+    # constants before graph lowering; never infer membership from Q/K/V.
+    allowed = [
+        [[False] * tokens for _ in range(tokens)]
+        for _ in range(num_windows)
     ]
-    output_scalars = packed.index_select(
-        0, torch.tensor(scalar_route, device=q.device, dtype=torch.long),
+    valid = [[False] * tokens for _ in range(num_windows)]
+    for window in full_idx:
+        for token in range(tokens):
+            allowed[window][token] = [True] * tokens
+            valid[window][token] = True
+    for token_group, window_group in groups:
+        for window in window_group:
+            for query in token_group:
+                valid[window][query] = True
+                for key in token_group:
+                    allowed[window][query][key] = True
+
+    # All-masked SDPA rows would have undefined softmax. Give each unused
+    # padding query a harmless key, then discard its output explicitly.
+    for window in range(num_windows):
+        for query in range(tokens):
+            if not valid[window][query]:
+                allowed[window][query][0] = True
+
+    mask = torch.tensor(allowed, dtype=torch.bool, device=q.device)
+    valid_mask = torch.tensor(valid, dtype=q.dtype, device=q.device)
+    query = q.reshape(batches, num_windows, heads, tokens, head_dim)
+    key = k.reshape(batches, num_windows, heads, tokens, head_dim)
+    value = v.reshape(batches, num_windows, heads, tokens, head_dim)
+    result = F.scaled_dot_product_attention(
+        query, key, value,
+        attn_mask=mask.unsqueeze(0).unsqueeze(2),
+        dropout_p=0.0, is_causal=False,
     )
-    return output_scalars.reshape(
-        total_windows, tokens, heads, head_dim,
-    ).permute(0, 2, 1, 3).contiguous()
+    result = result * valid_mask.view(1, num_windows, 1, tokens, 1)
+    return result.reshape(total, heads, tokens, head_dim)
