@@ -1,10 +1,11 @@
-"""Exact grouped-SDPA scatter legalization for AOT GPU compilation.
+"""Source-equivalent grouped-SDPA lowering for Vulkan AOT compilation.
 
-The upstream reference writes attention results through a transposed view
-using advanced indexed assignment. Re-express those same writes as index_copy
-into contiguous (window, token, head, channel) storage. This is an import-time
-lowering, not a substitute attention model; learned operations and grouping
-remain unchanged.
+The original attention outputs are computed on exactly the same per-region
+Q/K/V tensors. Reassembly uses a compile-time geometry routing table and
+a contiguous gather instead of indexed writes through a tensor view.
+
+GPU working storage is linear in the number of output tokens, not quadratic
+in the attention window size. No model weights or group semantics change.
 """
 
 from __future__ import annotations
@@ -33,53 +34,61 @@ def grouped_sdpa_contiguous(
 
     total_windows, heads, tokens, head_dim = q.shape
     batch_windows = total_windows // num_windows
-    token_slots = torch.arange(tokens, dtype=torch.long, device=q.device)
-    out_flat = q.new_zeros((total_windows * tokens, heads, head_dim))
 
-    def batched_windows(base):
-        indices = torch.tensor(base, device=q.device, dtype=torch.long)
-        if batch_windows == 1 or indices.numel() == 0:
-            return indices
-        offsets = (torch.arange(
-            batch_windows, device=q.device, dtype=torch.long
-        ) * num_windows)
-        return (indices.unsqueeze(0) + offsets.unsqueeze(1)).reshape(-1)
+    # Route positions are source-geometry constants for a compiled shape
+    # profile. 0 is the initial zero row, matching unassigned source pixels.
+    route = [0] * (total_windows * tokens)
+    pieces = [q.new_zeros((1, heads, head_dim))]
+    cursor = 1
 
-    def write_regions(window_index, token_index, result):
-        # This is exactly the element map used by the original
-        # out.permute(0,2,1,3)[win_idx[:,None],token_idx[None,:]] = attn.
-        row_index = (
-            window_index[:, None] * tokens + token_index[None, :]
-        ).reshape(-1)
+    def windows_for(base: tuple[int, ...]):
+        # Window-major ordering is identical to _batched_windows upstream.
+        window_ids = [
+            batch * num_windows + window
+            for batch in range(batch_windows)
+            for window in base
+        ]
+        return (
+            window_ids,
+            torch.tensor(window_ids, device=q.device, dtype=torch.long),
+        )
+
+    def add_output(window_ids, token_ids, result):
+        nonlocal cursor
         rows = result.permute(0, 2, 1, 3).reshape(-1, heads, head_dim)
-        # Write to the contiguous first dimension; unlike index_copy,
-        # aten.index_put is legalizable by the pinned IREE importer. The
-        # original GPU failure involved index_put through a transposed view.
-        out_flat[row_index] = rows
+        pieces.append(rows)
+        for window in window_ids:
+            for token in token_ids:
+                route[window * tokens + token] = cursor
+                cursor += 1
 
     if full_idx:
-        windows = batched_windows(full_idx)
+        window_ids, indices = windows_for(full_idx)
         result = F.scaled_dot_product_attention(
-            q.index_select(0, windows),
-            k.index_select(0, windows),
-            v.index_select(0, windows),
+            q.index_select(0, indices),
+            k.index_select(0, indices),
+            v.index_select(0, indices),
             dropout_p=0.0, is_causal=False,
         )
-        write_regions(windows, token_slots, result)
+        add_output(window_ids, range(tokens), result)
 
     for token_tuple, window_tuple in groups:
-        windows = batched_windows(window_tuple)
+        window_ids, window_index = windows_for(window_tuple)
         token_index = torch.tensor(
             token_tuple, device=q.device, dtype=torch.long,
         )
         result = F.scaled_dot_product_attention(
-            q.index_select(0, windows).index_select(2, token_index),
-            k.index_select(0, windows).index_select(2, token_index),
-            v.index_select(0, windows).index_select(2, token_index),
+            q.index_select(0, window_index).index_select(2, token_index),
+            k.index_select(0, window_index).index_select(2, token_index),
+            v.index_select(0, window_index).index_select(2, token_index),
             dropout_p=0.0, is_causal=False,
         )
-        write_regions(windows, token_index, result)
+        add_output(window_ids, token_tuple, result)
 
-    return out_flat.reshape(
+    packed = torch.cat(pieces, dim=0)
+    output_rows = packed.index_select(
+        0, torch.tensor(route, device=q.device, dtype=torch.long),
+    )
+    return output_rows.reshape(
         total_windows, tokens, heads, head_dim,
     ).permute(0, 2, 1, 3).contiguous()
