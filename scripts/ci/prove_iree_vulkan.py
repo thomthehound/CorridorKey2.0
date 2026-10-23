@@ -32,6 +32,7 @@ def cases():
         RMSNorm,
         SwiGLU,
         SwinBlock2D,
+        SwinBlock3D,
     )
 
     return {
@@ -77,6 +78,13 @@ def cases():
             lambda: SwinBlock2D(dim=16, num_heads=2, window_size=4,
                                 shift=(0, 2)),
             (1, 5, 7, 16),
+        ),
+        # First Stage-1-style true temporal shifted-window graph. Unlike
+        # Swin2D, this exercises upstream grouped index gather/scatter.
+        "swin3d-shift-padded": (
+            lambda: SwinBlock3D(dim=16, num_heads=2, window_H=4,
+                                window_W=4, shift=(2, 2)),
+            (1, 2, 5, 7, 16),
         ),
     }
 
@@ -143,7 +151,7 @@ def prepare(name: str):
     if name.startswith("rmsnorm"):
         with torch.no_grad():
             model.weight.copy_(torch.linspace(0.6, 1.4, 16))
-    if name.startswith("swin2d-shift"):
+    if name.startswith(("swin2d-shift", "swin3d-shift")):
         with torch.no_grad():
             torch.nn.init.normal_(model.attn.proj.weight, std=0.04)
             torch.nn.init.normal_(model.attn.proj.bias, std=0.02)
@@ -300,20 +308,30 @@ def run_case(name: str, directory: Path, run_vulkan: bool, target: str) -> dict:
                                 else "standard import legalization")}
     model, sample, expected = prepare(name)
     np.save(directory / "reference.npy", expected)
-    if name.startswith("swin2d-shift"):
-        # The source calls a Python-only geometry cache during forward.
-        # Specialize that call to its already-evaluated, source-derived
-        # constant for this exact shape profile while preserving the rest
-        # of the upstream block's forward.
+    if name.startswith(("swin2d-shift", "swin3d-shift")):
+        # Source Python region caches are shape-constant but use nonzero +
+        # tolist, which cannot be traced. Capture their actual output on
+        # CPU, then substitute only the cache during torch.export.
+        # The original grouped attention remains intact for 3D.
         import corridorkey.blocks as blocks
 
-        source_groups = blocks._shifted_region_groups_2d_cached
-        _, height, width, _ = sample.shape
-        size = model.window_size
-        height_pad = ((height + size - 1) // size) * size
-        width_pad = ((width + size - 1) // size) * size
-        signature = (height, width, height_pad, width_pad,
-                     size, model.shift_h, model.shift_w)
+        is_3d = name.startswith("swin3d")
+        cache_name = ("_shifted_region_groups_3d_cached" if is_3d
+                      else "_shifted_region_groups_2d_cached")
+        source_groups = getattr(blocks, cache_name)
+        if is_3d:
+            _, frames, height, width, _ = sample.shape
+            size_h, size_w = model.window_H, model.window_W
+        else:
+            _, height, width, _ = sample.shape
+            size_h = size_w = model.window_size
+        height_pad = ((height + size_h - 1) // size_h) * size_h
+        width_pad = ((width + size_w - 1) // size_w) * size_w
+        signature = ((frames, height, width, height_pad, width_pad,
+                      size_h, size_w, model.shift_h, model.shift_w)
+                     if is_3d else
+                     (height, width, height_pad, width_pad,
+                      size_h, model.shift_h, model.shift_w))
         groups = source_groups(*signature)
 
         def fixed_groups(*args):
@@ -321,11 +339,11 @@ def run_case(name: str, directory: Path, run_vulkan: bool, target: str) -> dict:
                 raise ValueError("Unexpected shifted-window export shape")
             return groups
 
-        blocks._shifted_region_groups_2d_cached = fixed_groups
+        setattr(blocks, cache_name, fixed_groups)
         try:
             exported = torch.export.export(model, (sample,), strict=True)
         finally:
-            blocks._shifted_region_groups_2d_cached = source_groups
+            setattr(blocks, cache_name, source_groups)
     else:
         exported = torch.export.export(model, (sample,), strict=True)
     exported = exported.run_decompositions({
