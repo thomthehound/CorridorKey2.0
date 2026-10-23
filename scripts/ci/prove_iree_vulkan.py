@@ -76,6 +76,63 @@ def prepare(name: str):
     return model, sample, expected
 
 
+def _sdpa_inference_math(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attn_mask=None,
+    dropout_p: float = 0.0,
+    is_causal: bool = False,
+    scale=None,
+    enable_gqa: bool = False,
+):
+    """Canonical matmul/softmax decomposition for the unmasked inference SDPA.
+
+    IREE's online_attention Vulkan lowering currently rejects a workgroup
+    memref result. Importing mathematically equivalent primitive operators
+    permits Vulkan compilation without changing any source model or weights.
+    Other SDPA modes must be legalized independently rather than approximated.
+    """
+    if attn_mask is not None or dropout_p != 0.0 or is_causal or enable_gqa:
+        raise NotImplementedError(
+            "Only unmasked, non-causal, dropout-free inference SDPA is legalized"
+        )
+    factor = query.shape[-1] ** -0.5 if scale is None else scale
+    scores = torch.matmul(query, key.transpose(-2, -1)) * factor
+    probabilities = torch.softmax(scores, dim=-1)
+    return torch.matmul(probabilities, value)
+
+
+def _read_device_result(config, result) -> np.ndarray:
+    """Copy the actual Vulkan result through IREE-owned host staging memory.
+
+    The high-level to_host() import path can allocate an unaligned NumPy
+    destination when Vulkan external host allocation requires page alignment.
+    The driver's own staging allocation satisfies device memory constraints.
+    """
+    import iree.runtime as ireert
+
+    source = result._buffer_view.get_buffer()
+    mem_type = int(ireert.MemoryType.HOST_LOCAL | ireert.MemoryType.DEVICE_VISIBLE)
+    usage = int(ireert.BufferUsage.TRANSFER_TARGET | ireert.BufferUsage.MAPPING_SCOPED)
+    staging = config.device.allocator.allocate_buffer(
+        memory_type=mem_type,
+        allowed_usage=usage,
+        allocation_size=source.byte_length(),
+    )
+    semaphore = config.device.create_semaphore(0)
+    config.device.queue_copy(
+        source,
+        staging,
+        wait_semaphores=ireert.HalFence.create_at(semaphore, 0),
+        signal_semaphores=ireert.HalFence.create_at(semaphore, 1),
+    )
+    ireert.HalFence.create_at(semaphore, 1).wait()
+    mapping = staging.map()
+    host = mapping.asarray(result._buffer_view.shape, result.dtype)
+    return np.array(host, copy=True)
+
+
 def execute_vulkan(binary: Path, sample: torch.Tensor) -> np.ndarray:
     import iree.runtime as ireert
 
@@ -89,7 +146,7 @@ def execute_vulkan(binary: Path, sample: torch.Tensor) -> np.ndarray:
         if len(output) != 1:
             raise AssertionError(f"expected one output, received {len(output)}")
         output = output[0]
-    return np.asarray(output.to_host())
+    return _read_device_result(config, output)
 
 
 def run_case(name: str, directory: Path, run_vulkan: bool, target: str) -> dict:
@@ -98,7 +155,14 @@ def run_case(name: str, directory: Path, run_vulkan: bool, target: str) -> dict:
               "vulkan_execute": False, "vulkan_requested": run_vulkan}
     model, sample, expected = prepare(name)
     np.save(directory / "reference.npy", expected)
-    output = aot.export(model, sample)
+    exported = torch.export.export(model, (sample,), strict=True)
+    exported = exported.run_decompositions({
+        torch.ops.aten.scaled_dot_product_attention.default: _sdpa_inference_math,
+    })
+    if any("scaled_dot_product_attention" in str(node.target)
+           for node in exported.graph.nodes):
+        raise AssertionError("An SDPA operation bypassed the export legalization")
+    output = aot.export(exported)
     output.verify()
     mlir_path = directory / "import.mlir"
     output.save_mlir(mlir_path)
