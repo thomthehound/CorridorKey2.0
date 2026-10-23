@@ -213,6 +213,7 @@ def run_case(name: str, directory: Path, run_vulkan: bool, target: str) -> dict:
 
     vmfb_path = directory / "vulkan.vmfb"
     output.session.set_flags(f"--iree-vulkan-target={target}")
+    output.session.set_flags("--iree-opt-level=O2")
     output.compile(save_to=vmfb_path, target_backends=["vulkan-spirv"])
     if not vmfb_path.is_file() or vmfb_path.stat().st_size < 100:
         raise AssertionError("Vulkan binary was empty")
