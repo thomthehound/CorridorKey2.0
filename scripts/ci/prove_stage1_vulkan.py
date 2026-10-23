@@ -47,7 +47,7 @@ def create_stage1():
 
     torch.manual_seed(20261023)
     model = Stage1(
-        d_16=48, d_64=96, cradio_dim=0, moge_dim=24, rvm_dim=0,
+        d_16=64, d_64=128, cradio_dim=0, moge_dim=24, rvm_dim=0,
         n_enc_16=1, n_body_64=2, n_dec_16=6,
         num_heads_16=4, num_heads_64=8,
         window_HW=4, local_mix_kernel=0, body64_local_mix_kernel=0,
@@ -77,7 +77,7 @@ def create_stage1():
     with torch.inference_mode():
         reference = model(*args[:3], hint_quality=hint_quality)
     if set(reference).difference({"baton", "aux", "bottleneck"}) or (
-        reference["baton"].shape != (1, 2, 48, 4, 4)
+        reference["baton"].shape != (1, 2, 64, 4, 4)
         or reference["aux"].shape != (1, 2, 4, 32, 32)
         or not np.isfinite(reference["baton"].numpy()).all()
         or not np.isfinite(reference["aux"].numpy()).all()
