@@ -173,8 +173,8 @@ def prepare(name: str):
     if name.startswith("rmsnorm"):
         with torch.no_grad():
             model.weight.copy_(torch.linspace(0.6, 1.4, 16))
-    if name.startswith(("swin2d-shift", "swin3d-shift"))
-            or name in ("fullspatial2d-stage2", "cswin2d-stage2"):
+    if (name.startswith(("swin2d-shift", "swin3d-shift"))
+            or name in ("fullspatial2d-stage2", "cswin2d-stage2")):
         with torch.no_grad():
             torch.nn.init.normal_(model.attn.proj.weight, std=0.04)
             torch.nn.init.normal_(model.attn.proj.bias, std=0.02)
