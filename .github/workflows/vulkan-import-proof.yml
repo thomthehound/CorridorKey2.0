@@ -62,6 +62,10 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      - name: Test Windows IREE python3 command resolution
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\ci\build_and_prove_iree_wave32.ps1 -CheckPythonOnly
       - name: Install CPU-only importer and IREE compiler
         shell: bash
         run: |
