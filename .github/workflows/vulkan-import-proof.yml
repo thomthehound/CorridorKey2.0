@@ -167,7 +167,7 @@ jobs:
         shell: bash
         run: |
           python scripts/ci/diagnose_stage1_down_vulkan.py --probe-only --output build/stage1-down-probe
-          python scripts/ci/diagnose_stage1_down_vulkan.py --import-only --modes native --output build/stage1-down-import
+          python scripts/ci/diagnose_stage1_down_vulkan.py --import-only --modes native,crop4,gemm4,spatial --output build/stage1-down-import
 
       - name: Verify Stage2 diagnostic probe selection
         shell: bash
