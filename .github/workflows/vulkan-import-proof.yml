@@ -40,6 +40,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate standalone wave32 build script
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            "scripts/ci/build_and_prove_iree_wave32.ps1",
+            [ref]$tokens, [ref]$parseErrors
+          ) | Out-Null
+          if ($parseErrors.Count -gt 0) {
+            $parseErrors | Format-List | Out-String | Write-Host
+            throw "PowerShell wave32 build script has syntax errors"
+          }
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
