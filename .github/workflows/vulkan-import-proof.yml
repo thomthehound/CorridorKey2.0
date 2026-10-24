@@ -60,6 +60,10 @@ jobs:
         shell: bash
         run: python scripts/ci/prove_checkpoint_stage2.py --self-test
 
+      - name: Verify strict trained Stage1 checkpoint loading
+        shell: bash
+        run: python scripts/ci/prove_checkpoint_stage1.py --self-test
+
       - name: Install software Vulkan device (Linux)
         if: runner.os == 'Linux'
         shell: bash
