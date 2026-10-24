@@ -71,6 +71,28 @@ cross-platform import checks are mandatory. **No physical-device success for
 this new fusion lowering has yet been demonstrated.** The original native
 linear operators remain available for continued backend investigation.
 
+## Trained Stage1 temporal attention QKV evidence
+
+With segmented `down` and `fuse` projections, physical AMD Vulkan
+matches all measured Stage1 operations through `body_64.0.norm1`. The
+next first-divergent operation is the source `body_64.0.attn.qkv.qkv`
+learned linear projection, mapping 1536 input features to 4608 outputs:
+4583/4608 values mismatch, with maximum absolute error `1.7739406`.
+The Q/K normalization, attention gate, and output projections are already
+downstream of the corrupted QKV input; their mismatches do not establish
+independent defects.
+
+The export path now offers the optional
+`--linear-reduction segmented128` to apply the same source-equivalent
+partial-sum lowering to original wide `nn.Linear` operations across
+Stage1, without modifying learned parameters or requiring a separate
+fix for each projection. The existing `--fuse-reduction segmented128`
+remains an independent control. The original source modules are restored
+after graph export. **The broad lowering has not yet been proven correct
+for the complete trained graph on the physical AMD device.** Compare its
+device results and performance with the failing native baseline before
+claiming a fix.
+
 ## Root-cause hypotheses (unresolved)
 
 1. **IREE lowering/tiling of wide reductions or matmuls.** The repeated 2× accumulation with both convolution and independent GEMM is consistent with duplicate contribution, lane/subgroup reuse, or a malformed reduction tree. These are hypotheses, not observations of generated machine code.
