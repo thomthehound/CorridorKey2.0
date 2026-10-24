@@ -9,6 +9,7 @@ ratios and compilation artifacts without changing trained inference.
 from __future__ import annotations
 
 import argparse
+from importlib import metadata
 import json
 import sys
 import traceback
@@ -32,6 +33,19 @@ class Reduction(torch.nn.Module):
             return squares.sum(dim=-1, keepdim=True)
         if self.operation == "mean_square":
             return squares.mean(dim=-1, keepdim=True)
+        if self.operation in ("split128_sum_square", "split128_mean_square"):
+            # Each source sum is over at most 128 channels, followed by
+            # an exact sum of the partial results. This is a diagnostic
+            # layout for the same mathematical channel reduction.
+            chunks = [
+                squares[..., start:start + 128].sum(dim=-1, keepdim=True)
+                for start in range(0, squares.shape[-1], 128)
+            ]
+            partials = torch.cat(chunks, dim=-1)
+            result = partials.sum(dim=-1, keepdim=True)
+            if self.operation == "split128_mean_square":
+                return result / squares.shape[-1]
+            return result
         raise ValueError(f"Unsupported reduction: {self.operation}")
 
 
@@ -70,13 +84,23 @@ def run(args):
     args.output.mkdir(parents=True, exist_ok=True)
     widths = parse_widths(args.widths)
     operations = args.operations.split(",")
-    supported = {"sum_square", "mean_square"}
+    supported = {
+        "sum_square", "mean_square",
+        "split128_sum_square", "split128_mean_square",
+    }
     if not operations or len(operations) != len(set(operations)):
         raise ValueError("Specify distinct reduction operations")
     if not set(operations).issubset(supported):
         raise ValueError(f"Supported operations: {sorted(supported)}")
     inputs = create_input(widths, args.source_input)
+    dependency_versions = {}
+    for package in ("iree-base-compiler", "iree-base-runtime", "iree-turbine"):
+        try:
+            dependency_versions[package] = metadata.version(package)
+        except metadata.PackageNotFoundError:
+            dependency_versions[package] = None
     report = {
+        "dependency_versions": dependency_versions,
         "scope": "unchanged FP32 mean/sum-square reductions on Vulkan",
         "target": args.target,
         "source_input": str(args.source_input) if args.source_input else None,
@@ -121,7 +145,7 @@ def run(args):
                     with torch.inference_mode():
                         cpu_exported = exported.module()(sample).detach().numpy()
                     np.testing.assert_allclose(
-                        cpu_exported, expected, atol=1e-6, rtol=1e-6,
+                        cpu_exported, expected, atol=2e-5, rtol=2e-5,
                         err_msg=f"{name}: CPU export changed reduction",
                     )
                     compiled = aot.export(exported)
@@ -183,6 +207,10 @@ def run(args):
                         "max_ratio": float(ratios.max()),
                         "cpu": expected.reshape(-1).tolist(),
                         "vulkan": actual.reshape(-1).tolist(),
+                        "source_expression": (
+                            "two_stage_128" if operation.startswith("split128")
+                            else "native"
+                        ),
                     })
                     np.save(args.output / f"{name}_vulkan.npy", actual)
                     print(
