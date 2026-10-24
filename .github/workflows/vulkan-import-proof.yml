@@ -162,7 +162,8 @@ jobs:
         shell: bash
         run: |
           python scripts/ci/diagnose_stage1_vulkan.py --import-only --output build/stage1-probe-check --target rdna1 --rms-reduction segmented128
-          python scripts/ci/diagnose_stage1_vulkan.py --import-only --down-reduction segmented128 --output build/stage1-segdown-check --target rdna1 --rms-reduction segmented128
+          python scripts/ci/test_stage1_fusion_lowering.py
+          python scripts/ci/diagnose_stage1_vulkan.py --import-only --down-reduction segmented128 --fuse-reduction segmented128 --output build/stage1-segdown-check --target rdna1 --rms-reduction segmented128
 
       - name: Verify Stage1 downsample differential fixture
         shell: bash
