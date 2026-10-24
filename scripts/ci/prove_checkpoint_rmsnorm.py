@@ -4,8 +4,8 @@
 Run the exact learned first-block normalization and its actual CPU input when
 --checkpoint is given. Compare native-rank, flattened token-major, and
 reassociated 256-channel reduction implementations with unchanged source
-weights. Emit independently compiled intermediate arithmetic results to
-identify incorrect Vulkan lowering without relaxing numerical tolerances.
+weights. Emit intermediate arithmetic results, and optionally evaluate alternative
+source-equivalent reduction lowerings without relaxing numerical tolerances.
 """
 
 from __future__ import annotations
@@ -62,6 +62,68 @@ class ChunkedRMSNorm(torch.nn.Module):
             variance + self.source.eps
         )).to(x.dtype)
         return normalized * self.source.weight.to(x.dtype)
+
+
+
+
+class ContractedRMSNorm(torch.nn.Module):
+    """Compute the original channel mean-square as a matrix-vector product.
+
+    A constant 1280x1 coefficient vector contracts the original squared
+    channels. This is mathematically RMSNorm, not an alternate learned model:
+    weights, epsilon, channel domain and per-token normalization are intact.
+    """
+
+    def __init__(self, source):
+        super().__init__()
+        self.source = source
+        channels = source.normalized_shape[0]
+        self.register_buffer(
+            "mean_coefficients",
+            torch.full((channels, 1), 1.0 / channels),
+            persistent=False,
+        )
+
+    def forward(self, x):
+        accum = x.float() if x.dtype in (
+            torch.float16, torch.bfloat16
+        ) else x
+        width = accum.shape[-1]
+        squared = accum.square().reshape(-1, width)
+        variance = (
+            squared @ self.mean_coefficients.to(dtype=accum.dtype)
+        ).reshape(*x.shape[:-1], 1)
+        scale = torch.rsqrt(variance + self.source.eps)
+        return (accum * scale).to(x.dtype) * self.source.weight.to(x.dtype)
+
+
+class PaddedRMSNorm(torch.nn.Module):
+    """Reduce over an explicitly zero-padded power-of-two channel dimension.
+
+    Divide by the original channel count, never the padded extent.
+    This tests the Vulkan reduction's tail handling without relaxing source
+    semantics or modifying checkpoint weights.
+    """
+
+    def __init__(self, source):
+        super().__init__()
+        self.source = source
+
+    def forward(self, x):
+        import torch.nn.functional as F
+
+        accum = x.float() if x.dtype in (
+            torch.float16, torch.bfloat16
+        ) else x
+        width = accum.shape[-1]
+        extent = 1 << (width - 1).bit_length()
+        square = F.pad(accum.square(), (0, extent - width))
+        variance = square.sum(dim=-1, keepdim=True) / width
+        return (
+            (accum * torch.rsqrt(variance + self.source.eps)).to(x.dtype)
+            * self.source.weight.to(x.dtype)
+        )
+
 
 
 
@@ -240,11 +302,21 @@ def run(args):
             }
             print(report["terms"]["traceback"], file=sys.stderr, flush=True)
 
-        for kind, variant in (
-            ("native_rank", module),
-            ("flat_tokens", FlatRMSNorm(module)),
-            ("chunked_256", ChunkedRMSNorm(module)),
-        ):
+        variants = [
+            ("native_rank", module, "O2"),
+            ("flat_tokens", FlatRMSNorm(module), "O2"),
+            ("chunked_256", ChunkedRMSNorm(module), "O2"),
+        ]
+        if args.explore_reductions:
+            # Distinct lowered graph families, including an unoptimized
+            # compilation of the original source operation. None changes
+            # the checkpoint weights, epsilon, or normalized channels.
+            variants.extend([
+                ("contracted", ContractedRMSNorm(module), "O2"),
+                ("padded_pow2", PaddedRMSNorm(module), "O2"),
+                ("native_rank_O0", module, "O0"),
+            ])
+        for kind, variant, opt_level in variants:
             entry = {"kind": kind, "compile": False, "numerical_match": None}
             report["cases"].append(entry)
             try:
@@ -265,7 +337,8 @@ def run(args):
                 compiled.session.set_flags(
                     f"--iree-vulkan-target={args.target}"
                 )
-                compiled.session.set_flags("--iree-opt-level=O2")
+                compiled.session.set_flags(f"--iree-opt-level={opt_level}")
+                entry["optimization"] = opt_level
                 vmfb = args.output / f"{kind}.vmfb"
                 compiled.compile(
                     save_to=vmfb, target_backends=["vulkan-spirv"],
@@ -339,6 +412,11 @@ def main():
     parser.add_argument("--width", type=int, default=64)
     parser.add_argument("--target", default="rdna1")
     parser.add_argument("--execute-vulkan", action="store_true")
+    parser.add_argument(
+        "--explore-reductions", action="store_true",
+        help="Also compile source-equivalent matmul and padded reductions, "
+             "plus the native source at IREE optimization level O0",
+    )
     parser.add_argument("--output", type=Path, default=Path("build/rmsnorm-proof"))
     args = parser.parse_args()
     if args.height <= 0 or args.width <= 0 or (
