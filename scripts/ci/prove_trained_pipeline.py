@@ -51,13 +51,50 @@ def run(args):
         "stages_executed_without_pytorch": False,
     }
     try:
-        invoke("Compile and prove real trained Stage1 on Vulkan", [
-            SCRIPTS / "prove_checkpoint_stage1.py",
-            args.checkpoint, "--frames", "1",
-            "--height", args.height, "--width", args.width,
-            "--target", args.target, "--rms-reduction", "segmented128",
-            "--compile", "--execute-vulkan", "--output", stage1_dir,
-        ])
+        try:
+            invoke("Compile and prove real trained Stage1 on Vulkan", [
+                SCRIPTS / "prove_checkpoint_stage1.py",
+                args.checkpoint, "--frames", "1",
+                "--height", args.height, "--width", args.width,
+                "--target", args.target, "--rms-reduction", "segmented128",
+                "--compile", "--execute-vulkan", "--output", stage1_dir,
+            ])
+        except subprocess.CalledProcessError:
+            if args.diagnose_stage1:
+                # The diagnostic recompiles the identical trained graph with
+                # intermediate tensor readbacks. Its nonzero exit is expected
+                # when it successfully identifies an incorrect GPU boundary.
+                diagnostic_dir = args.output / "stage1_diagnostic"
+                diagnostic_cmd = [
+                    sys.executable, str(SCRIPTS / "diagnose_stage1_vulkan.py"),
+                    "--checkpoint", str(args.checkpoint),
+                    "--frames", "1",
+                    "--height", str(args.height), "--width", str(args.width),
+                    "--target", str(args.target),
+                    "--rms-reduction", "segmented128",
+                    "--output", str(diagnostic_dir),
+                ]
+                print(
+                    "[trained pipeline] Stage1 GPU proof failed; collecting "
+                    "original-graph intermediate differences", flush=True,
+                )
+                diagnostic = subprocess.run(diagnostic_cmd, check=False)
+                report["stage1_diagnostic_exit_code"] = diagnostic.returncode
+                if (diagnostic_dir / "report.json").is_file():
+                    result = read_report(diagnostic_dir / "report.json") if (
+                        diagnostic.returncode == 0
+                    ) else json.loads(
+                        (diagnostic_dir / "report.json").read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                    report["stage1_first_divergence"] = result.get(
+                        "first_divergence"
+                    )
+                    report["stage1_diagnostic_report"] = str(
+                        diagnostic_dir / "report.json"
+                    )
+            raise
         stage1 = read_report(stage1_dir / "report.json")
         if not stage1.get("vulkan_execute"):
             raise AssertionError("Stage1 hardware proof did not complete")
@@ -120,6 +157,13 @@ def main():
     parser.add_argument("--target", default="rdna3")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=1)
+    parser.add_argument(
+        "--no-stage1-diagnostic", dest="diagnose_stage1",
+        action="store_false",
+        help="Skip automatic source-graph boundary localization after a "
+             "trained Stage1 GPU failure",
+    )
+    parser.set_defaults(diagnose_stage1=True)
     parser.add_argument(
         "--output", type=Path, default=Path("build/trained-two-stage")
     )
