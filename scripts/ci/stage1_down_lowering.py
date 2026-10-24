@@ -40,22 +40,33 @@ class SegmentedStage1DownConv(nn.Module):
         oh = (x.shape[-2] + 2 * ph - dh * (kh - 1) - 1) // sh + 1
         ow = (x.shape[-1] + 2 * pw - dw * (kw - 1) - 1) // sw + 1
 
-        padded = F.pad(x, (pw, pw, ph, ph))
-        taps = [
-            padded[
-                :, :,
-                ky * dh:ky * dh + oh * sh:sh,
-                kx * dw:kx * dw + ow * sw:sw,
+        if (x.shape[-2:] == (4, 4) and conv.kernel_size == (8, 8)
+                and conv.stride == (4, 4) and conv.padding == (2, 2)
+                and conv.dilation == (1, 1)):
+            # This exact 1x1-output geometry uses only the central 4x4 taps.
+            # The other learned coefficients multiply padding zeros. Keeping
+            # them in the GEMM would spend 4x the work for the same result.
+            patches = x.reshape(x.shape[0], -1)
+            weights = conv.weight[:, :, 2:6, 2:6].reshape(
+                conv.out_channels, -1
+            )
+        else:
+            padded = F.pad(x, (pw, pw, ph, ph))
+            taps = [
+                padded[
+                    :, :,
+                    ky * dh:ky * dh + oh * sh:sh,
+                    kx * dw:kx * dw + ow * sw:sw,
+                ]
+                for ky in range(kh)
+                for kx in range(kw)
             ]
-            for ky in range(kh)
-            for kx in range(kw)
-        ]
-        # Stack tap-major, then flatten channel-major to match Conv2d weights
-        # (output_channel, input_channel, kernel_y, kernel_x).
-        patches = torch.stack(taps, dim=2).permute(0, 3, 4, 1, 2).reshape(
-            x.shape[0] * oh * ow, -1
-        )
-        weights = conv.weight.flatten(1)
+            # Stack tap-major, then flatten channel-major to match Conv2d
+            # weights (output_channel, input_channel, kernel_y, kernel_x).
+            patches = torch.stack(taps, dim=2).permute(
+                0, 3, 4, 1, 2
+            ).reshape(x.shape[0] * oh * ow, -1)
+            weights = conv.weight.flatten(1)
         width = weights.shape[1]
         segments = (width + self.segment - 1) // self.segment
         remaining = segments * self.segment - width
