@@ -11,6 +11,9 @@ from __future__ import annotations
 import argparse
 from importlib import metadata
 import json
+import re
+import shutil
+import subprocess
 import sys
 import traceback
 from pathlib import Path
@@ -78,6 +81,84 @@ def create_input(widths, input_path):
     return tensor
 
 
+def collect_vulkan_properties(directory: Path):
+    """Record loader-reported properties, including subgroup size controls."""
+    command = shutil.which("vulkaninfo")
+    if not command:
+        return {"available": False, "reason": "vulkaninfo is not on PATH"}
+    try:
+        result = subprocess.run(
+            [command], text=True, capture_output=True,
+            encoding="utf-8", errors="replace", timeout=45,
+            check=False,
+        )
+        (directory / "vulkaninfo.txt").write_text(
+            result.stdout + "\n" + result.stderr, encoding="utf-8"
+        )
+        expressions = (
+            "deviceName", "driverName", "driverInfo", "driverVersion",
+            "subgroupSize", "minSubgroupSize", "maxSubgroupSize",
+            "requiredSubgroupSizeStages", "subgroupSizeControl",
+            "computeFullSubgroups", "maxComputeWorkgroupSubgroups",
+        )
+        properties = [
+            line.strip() for line in result.stdout.splitlines()
+            if any(re.match(r"^" + re.escape(name) + r"\s*=", line.strip())
+                   for name in expressions)
+        ]
+        return {
+            "available": True, "returncode": result.returncode,
+            "properties": properties, "full_output": "vulkaninfo.txt",
+        }
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"available": False, "reason": str(exc)}
+
+
+def probe_one_hot(runtime, config, width, operation):
+    """Map original input channel positions to measured GPU multiplicities.
+
+    Preserve the compiled (1,4,4,width) shape, feed runtime one-hot inputs
+    in batches of 16, and measure outputs without changing the reduction.
+    """
+    if operation not in ("sum_square", "mean_square"):
+        return None
+    from prove_iree_vulkan import _read_device_result
+    group = 16
+    observed = []
+    ideal = 1.0 / width if operation == "mean_square" else 1.0
+    for start in range(0, width, group):
+        hot = np.zeros((1, 4, 4, width), dtype=np.float32)
+        count = min(group, width - start)
+        for index in range(count):
+            hot.reshape(group, width)[index, start + index] = 1.0
+        result = runtime.main(rt_asdevice(config, hot))
+        if isinstance(result, (list, tuple)):
+            if len(result) != 1:
+                raise AssertionError("Unexpected one-hot output count")
+            result = result[0]
+        values = _read_device_result(config, result).reshape(-1)
+        observed.extend((values[:count] / ideal).astype(float).tolist())
+    multiples = np.asarray(observed, dtype=np.float64)
+    return {
+        "count": len(observed),
+        "expected_multiplier": 1.0,
+        "min": float(multiples.min()), "max": float(multiples.max()),
+        "median": float(np.median(multiples)),
+        "roughly_once": int(np.count_nonzero(
+            np.isclose(multiples, 1.0, atol=3e-3, rtol=3e-3)
+        )),
+        "roughly_twice": int(np.count_nonzero(
+            np.isclose(multiples, 2.0, atol=3e-3, rtol=3e-3)
+        )),
+        "by_channel": multiples.tolist(),
+    }
+
+
+def rt_asdevice(config, tensor):
+    import iree.runtime as rt
+    return rt.asdevicearray(config.device, tensor)
+
+
 def run(args):
     import iree.turbine.aot as aot
 
@@ -109,6 +190,10 @@ def run(args):
         "cases": [],
     }
     import iree.runtime as rt
+    if args.one_hot and not args.execute_vulkan:
+        raise ValueError("--one-hot requires --execute-vulkan")
+    if args.record_subgroups:
+        report["vulkan_properties"] = collect_vulkan_properties(args.output)
     if args.execute_vulkan:
         driver = rt.get_driver("vulkan")
         devices = driver.query_available_devices()
@@ -213,6 +298,17 @@ def run(args):
                         ),
                     })
                     np.save(args.output / f"{name}_vulkan.npy", actual)
+                    if args.one_hot and operation in ("sum_square", "mean_square"):
+                        case["one_hot"] = probe_one_hot(
+                            program, config, width, operation
+                        )
+                        print(
+                            f"[reduction sweep] {name}: one-hot "
+                            f"range={case['one_hot']['min']:.6g}.."
+                            f"{case['one_hot']['max']:.6g}; "
+                            f"twice={case['one_hot']['roughly_twice']}/"
+                            f"{width}", flush=True,
+                        )
                     print(
                         f"[reduction sweep] {name}: "
                         f"mismatched={mismatch}/{actual.size}, "
@@ -242,6 +338,11 @@ def main():
     parser.add_argument("--target", default="rdna1")
     parser.add_argument("--execute-vulkan", action="store_true")
     parser.add_argument("--dump-executables", action="store_true")
+    parser.add_argument("--one-hot", action="store_true",
+                        help="Measure per-channel contribution multiplicity "
+                             "with identical runtime reduction shapes")
+    parser.add_argument("--record-subgroups", action="store_true",
+                        help="Capture vulkaninfo device/subgroup properties")
     parser.add_argument(
         "--output", type=Path, default=Path("build/reduction-sweep")
     )
