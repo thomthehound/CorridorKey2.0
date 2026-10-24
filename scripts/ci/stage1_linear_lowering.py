@@ -84,3 +84,44 @@ def wrap_fusion_projections(fuse: nn.Module):
             setattr(fuse, name, source)
         raise
     return originals
+
+
+def wrap_wide_stage1_linears(source: nn.Module, *, min_width: int = 129):
+    """Temporarily lower wide learned linears in the original Stage1 model.
+
+    Operates on source modules, not on a separately reconstructed network.
+    Fusion projections have a distinct, previously validated lowering and
+    are intentionally excluded to keep the controls independent. Traversal
+    is snapshotted before edits, so a wrapped source_linear is not wrapped
+    recursively. The caller must restore (parent, name, original) pairs.
+    """
+    if min_width <= 128:
+        raise ValueError("Wide linear threshold must exceed 128")
+    candidates = []
+    for path, parent in list(source.named_modules()):
+        if path == "fuse" or path.startswith("fuse."):
+            continue
+        if isinstance(parent, SegmentedSourceLinear):
+            continue
+        if ".source_linear" in path:
+            continue
+        for name, child in list(parent.named_children()):
+            if type(child) is nn.Linear and child.in_features >= min_width:
+                candidates.append((parent, name, child))
+    if not candidates:
+        raise AssertionError("No Stage1 wide source linears found")
+    replaced = []
+    try:
+        for parent, name, child in candidates:
+            setattr(parent, name, SegmentedSourceLinear(child))
+            replaced.append((parent, name, child))
+    except BaseException:
+        restore_source_linears(replaced)
+        raise
+    return replaced
+
+
+def restore_source_linears(originals):
+    """Restore the exact source modules, including after export errors."""
+    for parent, name, source in reversed(originals):
+        setattr(parent, name, source)
