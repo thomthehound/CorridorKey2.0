@@ -5,8 +5,9 @@
 .DESCRIPTION
   Reuses the built IREE compiler from build_and_prove_iree_wave32.ps1.
   Never installs packages, modifies checkpoints or rebuilds LLVM/MLIR.
-  Native mode has no segmented lowering. Auto also tries source-faithful
-  segmented fallbacks if native verification fails.
+  Native (the default) uses original reductions throughout. Segmented
+  is an explicit diagnostic control. Auto may attempt that control after
+  a failed native proof but must not be treated as native acceptance.
 .EXAMPLE
   .\scripts\ci\run_trained_with_patched_iree.ps1
 .EXAMPLE
@@ -18,7 +19,7 @@ param(
     [string]$Checkpoint = "",
     [string]$OutputRoot = "",
     [ValidateSet("Native", "Segmented", "Auto")]
-    [string]$Mode = "Auto",
+    [string]$Mode = "Native",
     [string]$Target = "rdna3",
     [switch]$ReplayExisting
 )
