@@ -61,8 +61,9 @@ directory in the existing Conda environment:
 conda activate py313
 
 git clone --branch v3.13.0 --depth 1 https://github.com/iree-org/iree.git ..\iree-wave32
-git -C ..\iree-wave32 apply --check patches\iree\3.13.0-require-subgroup-size.patch
-git -C ..\iree-wave32 apply patches\iree\3.13.0-require-subgroup-size.patch
+$patch = (Resolve-Path patches\iree\3.13.0-require-subgroup-size.patch).Path
+git -C ..\iree-wave32 apply --check "$patch"
+git -C ..\iree-wave32 apply "$patch"
 git -C ..\iree-wave32 submodule update --init --recursive
 
 cmake -S ..\iree-wave32 -B ..\iree-wave32-build -G Ninja `
