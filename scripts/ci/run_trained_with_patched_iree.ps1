@@ -115,7 +115,7 @@ print("[trained wave32] Runtime version:", runtime, flush=True)
                 "--output", $out
             )
         }
-        Write-Host "[trained wave32] $pass: $out"
+        Write-Host "[trained wave32] ${pass}: $out"
         & python @options
         $result = $LASTEXITCODE
         Write-Host "[trained wave32] $pass exit status: $result"
