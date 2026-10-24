@@ -12,6 +12,43 @@ independently reproduced Vulkan/Python runtime host-import alignment defect.
 Keep their patches and tests separate. The combined trained Stage1 → Stage2
 runtime replay now **passes** with the local HAL staging-readback workaround.
 
+## Next-session start: results, dependencies and submission order
+
+**Completed CorridorKey milestone:** ten native FP32 Vulkan reduction cases
+pass on the Radeon 8060S, native trained Stage1 and Stage2 match source,
+and the combined IREE-only native Stage1→Stage2 replay passes source
+comparisons. Its **79.229 ms median** includes CPU staging/readback/reupload;
+frozen foundation networks, the full application and a GPU-resident baton
+bridge are separate future milestones.
+
+**Both-platform project CI:** [#190](https://github.com/thomthehound/CorridorKey2.0/actions/runs/40126750060)
+and [#191](https://github.com/thomthehound/CorridorKey2.0/actions/runs/40127603991)
+passed on Windows and Ubuntu. CPU CI is not the physical GPU proof.
+
+**Preserve the proven compiler:** keep the working IREE build directory
+`F:\dev\iree-wave32-v3.13.0-build` and the original
+[`3.13.0-require-subgroup-size.patch`](../patches/iree/3.13.0-require-subgroup-size.patch)
+unchanged. A **separate upstream-only portable candidate** was added at
+[`3.13.0-upstream-portable-subgroup-size.patch`](../patches/iree/3.13.0-upstream-portable-subgroup-size.patch).
+Its hunks were checked structurally against pristine IREE v3.13.0,
+but the candidate has not yet passed an IREE build, FileCheck tests,
+GPU validation or rebase against latest upstream `main`.
+
+**Next order of work:** (1) rebase/validate the portable subgroup patch
+on the current IREE source, including fixed-width and mixed-width tests;
+acknowledge overlapping [unmerged PR #25021](https://github.com/iree-org/iree/pull/25021).
+(2) Address the independent Windows Python genrule issue with real
+Windows MSVC/Ninja generator tests. (3) Fix the independent Vulkan
+host-import alignment issue with Python allocator regression tests.
+Repeat the upstream duplication search immediately before each PR.
+
+**Evidence custody:** the Radeon reduction report, compiler/SPIR-V
+dumps and passing combined runtime
+`build/trained-patched-iree/native/execution-replay-2/report.json`
+remain user-generated/local artifacts, not attached to IREE. Package
+and inspect the evidence (including absolute paths) before uploading
+any portions upstream. Do not claim these raw artifacts are in GitHub.
+
 ## 1. Confirmed IREE SPIR-V subgroup-size correctness defect
 
 **Status: patched locally and GPU-validated. Ready to prepare upstream PR.**
@@ -57,9 +94,11 @@ The frozen foundation networks remain outside this proof.
 
 Submit a narrow upstream fix with original/patched reduction output,
 the 192-channel one-hot map, the IREE compiler test fixture, and physical
-GPU properties. Do not claim that other subgroup-sensitive GEMM
-lowering paths are fixed without direct evidence. A mixed-capability
-`[32,64]` compiler test should be added if possible.
+GPU properties. Do not claim an unrelated GEMM bug without independent
+failing evidence. The **upstream-only candidate** now includes static
+and dynamic mixed `[32, 64]` compiler cases while retaining fixed-width
+implicit-size tests. These cases have **not** yet run through IREE's
+FileCheck/lit suite, and the candidate remains unproven on hardware.
 
 Reference:
 [`docs/iree-3.13-wave32-fix.md`](iree-3.13-wave32-fix.md).
@@ -294,15 +333,16 @@ Repeat the issue/PR search when preparing each submission.
    and credit prior discovery appropriately, and avoid broad unrelated
    reduction-pipeline changes.
 
-   **Required refinement of our local v3.13 patch:** #25021 records
-   `requestedSubgroupSize` **only for a target advertising multiple
-   supported subgroup widths**. Our current local patch sets it
-   unconditionally. Requesting a size unnecessarily can fail on
-   fixed-width Vulkan devices without subgroup-size-control support.
-   Rework the upstream patch with a fixed-width negative test and a
-   mixed-width positive test. Do not modify the already-proven local
-   compiler build until a separate regression pass validates the
-   portable upstream change.
+   **Refinement prepared in a separate patch:** #25021 records
+   `requestedSubgroupSize` only when a target advertises multiple
+   supported subgroup widths. Our GPU-proven local patch requests it
+   unconditionally. Fixed-width Vulkan devices may lack subgroup-size
+   control support and reject such an unnecessary request. The separate
+   upstream candidate implements conditional selection and adds mixed
+   static/dynamic regressions while leaving existing fixed-width tests
+   implicit. Its hunks apply structurally to v3.13.0, but FileCheck,
+   compilation, upstream-main rebase and GPU execution remain unverified.
+   Preserve the original validated build and patch.
 
    Related but different:
    [issue #24688](https://github.com/iree-org/iree/issues/24688)
@@ -359,10 +399,32 @@ public upstream attachments**; copy/sanitize the relevant results
 and hardware properties before creating PRs. The passing combined
 report path is
 `build/trained-patched-iree/native/execution-replay-2/report.json`.
-CorridorKey CI run
+CorridorKey CI runs
 [190](https://github.com/thomthehound/CorridorKey2.0/actions/runs/40126750060)
+and [191](https://github.com/thomthehound/CorridorKey2.0/actions/runs/40127603991)
 completed successfully on both Windows and Ubuntu. These CI jobs do
 not replace the user's physical Radeon proof.
+
+### Check the portable candidate in a separate IREE worktree
+
+The candidate was assembled against v3.13.0. Run it **only** in a clean
+separate worktree; do not alter the proven compiler source or build tree.
+Use the current upstream `main` source for the eventual PR and resolve
+any rebase differences deliberately.
+
+```powershell
+# Run in a clean IREE v3.13.0 worktree, not the proven patched tree:
+git apply --check F:\dev\CorridorKey2.0\patches\iree\3.13.0-upstream-portable-subgroup-size.patch
+git apply F:\dev\CorridorKey2.0\patches\iree\3.13.0-upstream-portable-subgroup-size.patch
+```
+
+Build or reuse **tools from this worktree**, then execute the upstream
+`config_default_reduction.mlir` fixture with `iree-opt` and FileCheck.
+Verify static and dynamic mixed-width targets record `subgroup_size=32`,
+while every fixed-width test remains implicit. Also test the serialized
+Vulkan pipeline contract and actual device execution on targets with
+mixed subgroup sizes and fixed subgroup sizes. Structural application
+of the patch does not replace these tests.
 
 ### Preservation and handoff checklist
 
