@@ -105,7 +105,7 @@ Vulkan/SPIR-V is the **GPU** target, not a portable NPU driver. The shared MLIR 
 
 ## Validation and maintenance
 
-- Model compatibility CI ingests each upstream CorridorKey checkpoint/config and emits: imported graph inventory, unsupported ops, compiled graph coverage, precision and device requirements, output-diff report, and full end-to-end smoke results where hardware is available.
+- Model compatibility CI ingests each future CorridorKey checkpoint/config and emits: imported graph inventory, unsupported ops, compiled graph coverage, precision and device requirements, output-diff report, and full end-to-end smoke results where hardware is available.
 - Source model release updates pass through import → legalization → compilation → differential tests → benchmark. Supported operators and schedulers remain reusable.
 - Test existing graph fixtures as regression tests when changing compiler, IREE, MLIR, Vulkan features or AMD drivers.
 - Build native components on `windows-latest` and current Ubuntu LTS. GPU correctness and performance must be validated on real AMD hardware.
@@ -421,7 +421,7 @@ python scripts/ci/prove_checkpoint_stage2.py weights/corridorkey_v2.safetensors 
 
 Both source/export CPU and source/device results remain independently
 checked. If the real model passes, benchmark the native and segmented
-kernels and pursue an upstream compiler reduction fix rather than
+kernels and use a compiler reduction correction rather than
 permanently making this model-specific. Keep final acceptance attached
 to an actual trained checkpoint executing on physical AMD hardware.
 
@@ -490,7 +490,7 @@ the original /16→/64 downsample; the preceding stem and encoder probes pass.
 **Root cause remains open.** IREE lowering, the Vulkan driver compiler, and
 execution/dispatch behavior still require controlled cross-driver testing and
 generated-code inspection. A segmented computation is a numerical correctness
-control, not an upstream fix. The generalized segmented Stage1 export and
+control, not a compiler fix. The generalized segmented Stage1 export and
 connected two-stage Vulkan proof still require physical-hardware validation.
 Retain the failing native variants as reproducible baselines, along with driver,
 compiler, target, IR/SPIR-V, and performance metadata.
