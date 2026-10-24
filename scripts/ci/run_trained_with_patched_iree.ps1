@@ -19,7 +19,8 @@ param(
     [string]$OutputRoot = "",
     [ValidateSet("Native", "Segmented", "Auto")]
     [string]$Mode = "Auto",
-    [string]$Target = "rdna3"
+    [string]$Target = "rdna3",
+    [switch]$ReplayExisting
 )
 
 Set-StrictMode -Version Latest
@@ -38,6 +39,46 @@ if (-not $OutputRoot) {
 $BuildDir = [IO.Path]::GetFullPath($BuildDir)
 $Checkpoint = [IO.Path]::GetFullPath($Checkpoint)
 $OutputRoot = [IO.Path]::GetFullPath($OutputRoot)
+if ($ReplayExisting) {
+    if ($Mode -eq "Auto") {
+        throw "Replay requires -Mode Native or -Mode Segmented, identifying the existing compiled proof."
+    }
+    $sourceRoot = Join-Path $OutputRoot ($Mode.ToLowerInvariant())
+    $stage1Dir = Join-Path $sourceRoot "stage1"
+    $stage2Dir = Join-Path $sourceRoot "stage2"
+    $stage1Vmfb = Join-Path $stage1Dir "stage1.vmfb"
+    $stage2Vmfb = Join-Path $stage2Dir "stage2.vmfb"
+    foreach ($required in @(
+        $stage1Vmfb, $stage2Vmfb,
+        (Join-Path $stage1Dir "input_0.npy"),
+        (Join-Path $stage1Dir "source_0.npy"),
+        (Join-Path $stage1Dir "source_1.npy"),
+        (Join-Path $stage2Dir "source_0.npy")
+    )) {
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+            throw "Required compiled artifact or reference not found: $required"
+        }
+    }
+    $candidate = Join-Path $sourceRoot "execution-replay"
+    $out = $candidate
+    $index = 2
+    while (Test-Path -LiteralPath $out) {
+        $out = "$candidate-$index"
+        $index++
+    }
+    Write-Host "[trained wave32] Replaying existing $Mode VMFBs without recompilation."
+    & python (Join-Path $repoRoot "scripts\ci\execute_compiled_stages.py") `
+        --stage1-vmfb $stage1Vmfb --stage2-vmfb $stage2Vmfb `
+        --inputs $stage1Dir --stage1-reference $stage1Dir `
+        --stage2-reference $stage2Dir --runs 3 --warmup 1 --output $out
+    if ($LASTEXITCODE -ne 0) {
+        throw "Compiled $Mode replay failed; report: $(Join-Path $out 'report.json')"
+    }
+    Write-Host "[trained wave32] Compiled $Mode replay passed."
+    Write-Host "[trained wave32] Report: $(Join-Path $out 'report.json')"
+    return
+}
+
 $compilerBindings = Join-Path $BuildDir "compiler\bindings\python"
 $pipeline = Join-Path $repoRoot "scripts\ci\prove_trained_pipeline.py"
 
