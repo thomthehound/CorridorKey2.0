@@ -8,7 +8,7 @@ import unittest
 
 import numpy as np
 
-from iree_staged_readback import staged_readback
+from iree_staged_readback import VulkanReadback, staged_readback
 
 
 class _FakeSource:
@@ -123,6 +123,79 @@ class StagedReadbackTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "Nonfinite"):
             staged_readback(value, self.device, self.runtime)
+
+
+    def test_native_transfer_remains_default(self):
+        expected = np.arange(16, dtype=np.float32).reshape(2, 8)
+        counts = [0]
+
+        def to_host():
+            counts[0] += 1
+            return expected
+
+        value = types.SimpleNamespace(to_host=to_host)
+        reader = VulkanReadback(self.device, self.runtime)
+        np.testing.assert_array_equal(reader.read(value), expected)
+        np.testing.assert_array_equal(reader.read(value), expected)
+        self.assertEqual(reader.strategy, "runtime")
+        self.assertEqual(counts[0], 2)
+        self.assertEqual(self.device.allocator.calls, [])
+        self.assertEqual(self.device.copies, 0)
+
+    def test_alignment_failure_switches_once_and_reuses_staging(self):
+        expected = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+        counts = [0]
+
+        def to_host():
+            counts[0] += 1
+            raise ValueError(
+                "host allocation import pointer does not satisfy Vulkan "
+                "minImportedHostPointerAlignment 4096"
+            )
+
+        value = types.SimpleNamespace(
+            _buffer_view=_FakeView(_FakeSource(expected)),
+            dtype=np.dtype("float32"),
+            to_host=to_host,
+        )
+        reader = VulkanReadback(self.device, self.runtime)
+        result1 = reader.read(value)
+        np.testing.assert_array_equal(result1, expected)
+        result2 = reader.read(value)
+        np.testing.assert_array_equal(result2, expected)
+        self.assertEqual(reader.strategy, "staging")
+        self.assertEqual(counts[0], 1)
+        self.assertEqual(len(self.device.allocator.calls), 1)
+        self.assertEqual(self.device.copies, 2)
+        self.assertTrue(result1.flags.owndata)
+        self.assertTrue(result2.flags.owndata)
+        self.device.allocator.staging.data.fill(0)
+        np.testing.assert_array_equal(result1, expected)
+        np.testing.assert_array_equal(result2, expected)
+
+    def test_other_transfer_failures_are_not_suppressed(self):
+        def to_host():
+            raise ValueError("DEVICE_LOST: unrelated transfer failure")
+
+        value = types.SimpleNamespace(to_host=to_host)
+        reader = VulkanReadback(self.device, self.runtime)
+        with self.assertRaisesRegex(ValueError, "DEVICE_LOST"):
+            reader.read(value)
+        self.assertEqual(reader.strategy, "runtime")
+        self.assertEqual(self.device.allocator.calls, [])
+
+    def test_staging_buffers_are_cached_by_size_not_shape(self):
+        data1 = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+        data2 = np.arange(24, dtype=np.float32).reshape(4, 6)
+        reader = VulkanReadback(self.device, self.runtime, force_staging=True)
+        for data in (data1, data2):
+            value = types.SimpleNamespace(
+                _buffer_view=_FakeView(_FakeSource(data)),
+                dtype=data.dtype,
+            )
+            np.testing.assert_array_equal(reader.read(value), data)
+        self.assertEqual(len(self.device.allocator.calls), 1)
+        self.assertEqual(self.device.copies, 2)
 
 
 if __name__ == "__main__":
