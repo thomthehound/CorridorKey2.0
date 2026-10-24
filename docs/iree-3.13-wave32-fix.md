@@ -75,6 +75,38 @@ verify that the required subgroup size (16, 32, or 64, depending on the
 test target) appears in translation information. It does not alter
 the original PyTorch graph, checkpoint tensors, or arithmetic.
 
+## Resuming an interrupted Windows build
+
+If Ninja reports exit status **9009** while generating
+`runtime/src/iree/vm/bytecode/isa/op_table.h` or
+`encoding_table.c`, and Windows says `python3` is unavailable,
+the compiler object files are **not** corrupted. Some upstream IREE 3.13
+custom commands call literal `python3`, even when CMake was given
+`Python3_EXECUTABLE`. Windows may resolve that name to its Microsoft
+Store app execution alias rather than the activated Conda interpreter.
+
+The build wrapper now creates a small `python3.cmd` forwarding to the
+current Conda `python.exe`, prepends it to `PATH` for its own process,
+and verifies the command from `cmd.exe` before resuming Ninja. It
+restores the original `PATH` afterwards. No Python install,
+Windows Settings change, cache clean, or new IREE checkout is needed.
+
+```powershell
+git pull --ff-only
+.\scripts\ci\build_and_prove_iree_wave32.ps1
+```
+
+Existing successful compilation outputs in the unchanged CMake/Ninja
+build tree remain reusable; the script builds the targeted
+`IREECompilerPythonModules` dependency graph rather than the full
+default `all` target. Normal CMake reconfiguration does not by itself
+require wiping compiled objects. For an isolated check of `python3`
+resolution without a compiler build, run:
+
+```powershell
+.\scripts\ci\build_and_prove_iree_wave32.ps1 -CheckPythonOnly
+```
+
 ## One-command Windows build and AMD proof
 
 From the CorridorKey checkout with the existing Conda environment activated:
