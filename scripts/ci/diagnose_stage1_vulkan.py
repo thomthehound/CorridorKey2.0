@@ -151,6 +151,15 @@ def expose_stage1_boundaries(exported, scopes=CORE_SCOPES):
     return exported, names, final_count, missed
 
 
+def diagnostic_has_mismatch(report):
+    """Final-output failures are failures even without an intermediate probe."""
+    return bool(
+        report.get("first_divergence")
+        or report.get("final_output_mismatches")
+        or report.get("error")
+    )
+
+
 def run(args):
     import iree.turbine.aot as aot
 
@@ -169,6 +178,7 @@ def run(args):
         "probes": [],
         "unmatched_scopes": [],
         "first_divergence": None,
+        "final_output_mismatches": [],
         "probe_only": args.probe_only,
         "import_only": args.import_only,
         "imported": False,
@@ -282,6 +292,8 @@ def run(args):
                 "total": int(actual.size),
             }
             report["probes"].append(info)
+            if index < final_count and count:
+                report["final_output_mismatches"].append(info)
             if index >= final_count and count and report["first_divergence"] is None:
                 report["first_divergence"] = name
             np.save(args.output / f"{name.replace('.', '_')}_vulkan.npy", actual)
@@ -300,7 +312,7 @@ def run(args):
                 "[Stage1 differential] no divergence at sampled boundaries",
                 flush=True,
             )
-        return int(bool(report["first_divergence"]))
+        return int(diagnostic_has_mismatch(report))
     except Exception as exc:
         report["error"] = f"{type(exc).__name__}: {exc}"
         report["traceback"] = traceback.format_exc()
