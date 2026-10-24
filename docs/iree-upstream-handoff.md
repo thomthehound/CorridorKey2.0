@@ -6,9 +6,11 @@ Vulkan port. The local work is on
 tracked by [draft PR #1](https://github.com/thomthehound/CorridorKey2.0/pull/1)
 and [issue #2](https://github.com/thomthehound/CorridorKey2.0/issues/2).
 
-**Upstream IREE pull requests have not been opened.** There are two confirmed,
-independent upstream candidates, and one newly identified runtime candidate.
-Do not conflate them.
+**Upstream IREE pull requests have not been opened.** There are **three distinct upstream candidates**: two previously confirmed
+issues (SPIR-V subgroup correctness and Windows Python invocation), plus an
+independently reproduced Vulkan/Python runtime host-import alignment defect.
+Keep their patches and tests separate. The combined trained Stage1 → Stage2
+runtime replay now **passes** with the local HAL staging-readback workaround.
 
 ## 1. Confirmed IREE SPIR-V subgroup-size correctness defect
 
@@ -49,8 +51,9 @@ exactly once. Emitted SPIR-V MLIR includes
 compiles and matches the original source outputs; native Stage2 (226
 trained tensors) independently compiles and matches source outputs
 when driven by the trained Stage1 baton. Neither stage uses segmented
-reductions in this test. The *combined runtime chain* remains a separate
-acceptance condition (see issue 3 below).
+reductions in this test. **The combined IREE-only Stage1 → Stage2 runtime
+replay now passes** with the local staging-readback workaround; see §3.
+The frozen foundation networks remain outside this proof.
 
 Submit a narrow upstream fix with original/patched reduction output,
 the 192-channel one-hot map, the IREE compiler test fixture, and physical
@@ -99,8 +102,9 @@ completed Ninja objects. This workaround is **not** the upstream fix.
 
 ## 3. IREE Python Vulkan host-import alignment failure
 
-**Status: reproduced and source-localized; runtime upstream candidate;
-combined native trained chain not yet proven end-to-end.**
+**Status: reproduced and source-localized; runtime upstream candidate.
+Combined native trained Stage1 → Stage2 now validated with the local
+HAL staging-readback workaround.**
 
 With the patched compiler, Stage1 and Stage2 **both pass independently**,
 but the combined IREE-only host aborts when calling
@@ -133,7 +137,12 @@ tests. An upstream runtime patch is **not yet implemented or filed**.
 CorridorKey's execution-only local readback fix is isolated in
 [`scripts/ci/iree_staged_readback.py`](../scripts/ci/iree_staged_readback.py)
 and uses the same public HAL staging-copy operations as IREE's own
-fallback instead of importing unaligned NumPy memory. IREE 3.13.0
+fallback instead of importing unaligned NumPy memory. The follow-up
+replay initially failed with `RuntimeError: bad cast` because the helper
+passed NumPy's scalar class `np.float32` to `MappedMemory.asarray`
+instead of a `np.dtype('float32')` descriptor. That helper call was
+corrected and its mock test now enforces the binding's dtype contract.
+IREE 3.13.0
 exposes its buffer view on `DeviceArray` only as a private attribute;
 this access is deliberately confined to that helper. A regression
 test in `scripts/ci/test_iree_staged_readback.py` checks staging copy,
@@ -162,19 +171,116 @@ Results are written to `execution-replay/report.json` in the same
 prior reports. It compares both Stage1's baton/auxiliary outputs and
 Stage2's output against the original independent reference tensors.
 
-A passing replay will establish the **combined trained Stage1→Stage2
-native Vulkan chain**, still using an explicit CPU NHWC→NCHW bridge.
-It will **not** establish a GPU-resident interstage bridge, the
-foundation-network execution path, a full video-matting application, or
-end-to-end production performance. These are separate milestones.
+**Passing hardware replay reported 2026-10-24:**
+
+```text
+[native Vulkan partitions] trained Stage1 -> Stage2 executed;
+median wall-clock=79.229 ms (includes interstage readback/reupload)
+[trained wave32] Compiled Native replay passed.
+```
+
+The report is stored at
+`build/trained-patched-iree/native/execution-replay-2/report.json`.
+This verifies **combined trained Stage1→Stage2 native Vulkan computation**
+with original source-reference comparisons, via the explicit CPU
+NHWC→NCHW bridge. The 79.229 ms figure includes runtime dispatch,
+readback, CPU transformation and GPU reupload; it is **not** a pure
+GPU-kernel timing or an optimized full-application benchmark.
+It does **not** establish a GPU-resident interstage bridge, execution of
+the frozen foundation networks, a complete video-matting application,
+or production-level throughput. Those remain separate milestones.
+
+To replay without compiling again, use the command above. The initial
+failure folders remain available; subsequent replays receive numbered
+output directories.
+
+## Required upstream regression tests and CI portability contract
+
+These are mandatory acceptance criteria for preparing the separate IREE
+upstream changes in the next work session, not merely ideas for later.
+
+### Windows must build without Unix/Python-command assumptions
+
+- Add a **Windows MSVC + Ninja** regression using a valid explicitly
+  configured `Python3_EXECUTABLE` pointing to `python.exe` and **no
+  usable `python3` executable on PATH**. A stub named `python3` that
+  fails with a clear error is a useful guard against accidentally falling
+  back to it, provided the selected interpreter is still accessible.
+- Run the real code-generation steps (VM ISA `op_table.h`, encoding
+  `encoding_table.c/.h`, and the plugin ABI generator), check outputs,
+  and verify reconfiguration and incremental rebuild without cleaning
+  previously compiled objects. A configure-only smoke test is insufficient.
+- Preserve both CMake and Bazel generation workflows: fix the shared
+  `iree_genrule` CMake handling, not files generated from `BUILD.bazel`;
+  avoid incorrectly rewriting arbitrary shell commands or breaking paths
+  containing spaces. Confirm `Python_EXECUTABLE` and `Python3_EXECUTABLE`
+  remain consistent when both are needed.
+- Test at least `windows-latest` and supported Linux CI for the changed
+  build rule. The upstream specialized Windows runner happens to install
+  `python3`; **passing only on that preconfigured runner does not
+  exercise the original failure condition**.
+
+### Vulkan is a first-class AMD path, not a HIP/ROCm fallback
+
+- Compiler tests must cover a Vulkan target advertising **both
+  `subgroup_size_choices = [32,64]`**, with explicit assertions that
+  the preferred subgroup width reaches `translation_info`, SPIR-V
+  `entry_point_abi`, and serialized Vulkan `PipelineDef.subgroup_size`.
+  Exercise **both static and dynamic reductions** and workgroup shapes
+  that expose the earlier wave32/wave64 mismatch (notably 192 channels).
+  Also cover a fixed-width target, rather than hard-coding wave32.
+- Include runtime tests of native sum/mean-square reductions, especially
+  widths 128, 192, 256, 512 and 1280, and a **per-channel one-hot
+  multiplicity test** to catch double-counting that aggregate numerical
+  checks can miss. Use Vulkan explicitly. Do not silently substitute
+  CPU execution, HIP, ROCm, or segmented source rewrites.
+- A Windows and Linux Vulkan software ICD can provide general smoke
+  coverage when their subgroup capabilities support the case; the
+  original dynamic subgroup-width contract must additionally be tested
+  on real physical hardware supporting both wave32 and wave64.
+  Report unsupported capabilities and skips explicitly; don't represent
+  a skipped GPU test as a hardware pass.
+- Do **not** make HIP or ROCm a prerequisite for configuring, compiling,
+  or executing IREE's Vulkan correctness tests. Where backend-specific
+  paths differ, test them independently. Prefer source-accurate cross-backend
+  interfaces to vendor-specific assumptions.
+
+### Host-memory import and readback must honor Vulkan's constraints
+
+- Reproduce `DeviceArray.to_host()` on a Vulkan device with nontrivial
+  `minImportedHostPointerAlignment` (4096 on the observed Radeon).
+  Test both pointer and allocation-size alignment; a bit indicating
+  `IMPORTABLE` does not mean a random NumPy allocation satisfies
+  `vkImportMemoryHostPointerInfoEXT` requirements.
+- Add a mocked allocator test in IREE's Python runtime suite to force
+  the importability branch **and reject unaligned pointers**, verifying
+  either a properly aligned import or safe fallback to HAL-owned staging.
+  Also exercise the existing staging path, synchronization, the NumPy
+  dtype-descriptor contract, and returned-array lifetime after unmapping.
+- Benchmark the appropriate fast aligned-import path if supported;
+  correctness should not require disabling host import globally or
+  degrading HIP/CUDA readbacks. The regression must explicitly cover
+  Vulkan without any HIP/ROCm dependency.
+
+### Upstream submission boundaries
+
+Prepare **separate** IREE PRs with focused regression tests and independent
+reproducers: (1) SPIR-V reduction subgroup contract, (2) Windows CMake
+Python executable selection, (3) Python Vulkan host-import alignment.
+Don't assert the third runtime bug is a compiler problem, and don't
+turn the first into a blanket wave32 setting. Upstream PRs/issues are
+**not yet opened**. Attach the passing Radeon hardware proof and the
+portable Windows repro. Keep repository handoff status current when
+upstream work proceeds.
 
 ### Preservation and handoff checklist
 
 - Do not delete `F:\dev\iree-wave32-v3.13.0-build`; the successfully
   compiled compiler is reused for GPU tests and future A/B experiments.
 - Keep the original failing reduction report, the passing 10-case
-  wave32 report, the native Stage1/Stage2 reports and executable dumps,
-  and the failed combined-host execution report.
+  wave32 report, native Stage1/Stage2 reports and executable dumps,
+  the failed combined-host execution reports, and the **passing
+  `execution-replay-2/report.json`** result (79.229 ms median).
 - Keep upstream proposals **separate**: SPIR-V reduction subgroup
   contract, Windows CMake Python selection, and the new Python runtime
   Vulkan host-alignment candidate.
