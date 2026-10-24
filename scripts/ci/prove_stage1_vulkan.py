@@ -123,11 +123,13 @@ def create_stage1():
 
 
 def export_stage1(model, args, *, rms_reduction="native",
-                  down_reduction="native"):
+                  down_reduction="native", fuse_reduction="native"):
     if rms_reduction not in ("native", "segmented128"):
         raise ValueError(f"Unsupported Stage1 RMSNorm lowering: {rms_reduction}")
     if down_reduction not in ("native", "segmented128"):
         raise ValueError(f"Unsupported Stage1 downsample lowering: {down_reduction}")
+    if fuse_reduction not in ("native", "segmented128"):
+        raise ValueError(f"Unsupported Stage1 fusion lowering: {fuse_reduction}")
     import corridorkey.blocks as blocks
 
     # Evaluate the source's static shifted-region cache on CPU for this
@@ -162,37 +164,47 @@ def export_stage1(model, args, *, rms_reduction="native",
     with torch.inference_mode():
         authoritative = tuple(t.detach().numpy().copy() for t in model(*args))
     saved_down = None
-    if down_reduction == "segmented128":
-        from stage1_down_lowering import SegmentedStage1DownConv
-
-        original_down = model.source.down.conv
-        if not isinstance(original_down, torch.nn.Conv2d):
-            raise TypeError("Expected original Stage1 downsample Conv2d")
-        saved_down = original_down
-        model.source.down.conv = SegmentedStage1DownConv(original_down)
-    saved = []
-    for parent in list(model.named_modules()):
-        module = parent[1]
-        for name, child in list(module.named_children()):
-            if isinstance(child, blocks.RMSNorm):
-                saved.append((module, name, child))
-                setattr(module, name, FlattenedStage1RMSNorm(child))
-    if not saved:
-        raise AssertionError("Expected source Stage1 RMSNorm layers")
+    saved_fuse = []
+    saved_norm = []
     blocks._shifted_region_groups_3d_cached = fixed
     try:
+        if down_reduction == "segmented128":
+            from stage1_down_lowering import SegmentedStage1DownConv
+
+            original_down = model.source.down.conv
+            if not isinstance(original_down, torch.nn.Conv2d):
+                raise TypeError("Expected original Stage1 downsample Conv2d")
+            saved_down = original_down
+            model.source.down.conv = SegmentedStage1DownConv(original_down)
+        if fuse_reduction == "segmented128":
+            from stage1_linear_lowering import wrap_fusion_projections
+            saved_fuse = wrap_fusion_projections(model.source.fuse)
+
+        for _, module in list(model.named_modules()):
+            for name, child in list(module.named_children()):
+                if isinstance(child, blocks.RMSNorm):
+                    saved_norm.append((module, name, child))
+                    setattr(module, name, FlattenedStage1RMSNorm(child))
+        if not saved_norm:
+            raise AssertionError("Expected source Stage1 RMSNorm layers")
+
         with torch.inference_mode():
             flattened = tuple(t.detach().numpy() for t in model(*args))
+        tolerance = (
+            2e-5 if down_reduction == "segmented128"
+            or fuse_reduction == "segmented128" else 1e-6
+        )
         for index, (reference, actual) in enumerate(zip(authoritative, flattened)):
-            tolerance = 2e-5 if down_reduction == "segmented128" else 1e-6
             np.testing.assert_allclose(
                 actual, reference, atol=tolerance, rtol=tolerance,
                 err_msg=f"Export-only Stage1 lowering changed source output {index}",
             )
         exported = torch.export.export(model, args, strict=True)
     finally:
-        for parent, name, original_norm in saved:
+        for parent, name, original_norm in saved_norm:
             setattr(parent, name, original_norm)
+        for name, original_linear in saved_fuse:
+            setattr(model.source.fuse, name, original_linear)
         if saved_down is not None:
             model.source.down.conv = saved_down
         blocks._shifted_region_groups_3d_cached = original
