@@ -160,6 +160,32 @@ def load_trained_downsample(checkpoint, height, width, frames):
     return stage1.down.conv, captured[0], count
 
 
+def accumulation_analysis(actual, expected, bias):
+    """Distinguish duplicated MAC accumulation from repeated bias addition."""
+    y = np.asarray(expected, dtype=np.float64).reshape(-1)
+    gpu = np.asarray(actual, dtype=np.float64).reshape(-1)
+    b = np.asarray(bias, dtype=np.float64).reshape(-1)
+    if y.size != b.size or gpu.size != b.size:
+        return None
+    dot = y - b
+    gpu_dot = gpu - b
+    denominator = np.dot(dot, dot)
+    scale = float(np.dot(dot, gpu_dot) / denominator) if denominator else None
+    doubled = 2.0 * dot + b
+    residual = gpu - doubled
+    return {
+        "dot_scale_least_squares": scale,
+        "twice_dot_plus_bias_max_error": float(np.max(np.abs(residual))),
+        "twice_dot_plus_bias_mean_error": float(np.mean(np.abs(residual))),
+        "twice_dot_plus_bias_mismatched": int(np.count_nonzero(
+            ~np.isclose(gpu, doubled, atol=3e-3, rtol=3e-3)
+        )),
+        "twice_dot_plus_bias_samples": int(gpu.size),
+        "bias_head": [float(v) for v in b[:8]],
+        "residual_head": [float(v) for v in residual[:8]],
+    }
+
+
 def stats(actual, expected):
     if actual.shape != expected.shape or not np.isfinite(actual).all():
         raise AssertionError("Downsample result has incorrect shape or nonfinite values")
@@ -267,6 +293,22 @@ def run(args):
                 actual = _read_device_result(config, result)
                 np.save(args.output / f"{mode}_vulkan.npy", actual)
                 entry["vulkan"] = stats(actual, reference)
+                if conv.bias is not None:
+                    entry["accumulation_analysis"] = accumulation_analysis(
+                        actual, reference, conv.bias.detach().numpy()
+                    )
+                    info = entry["accumulation_analysis"]
+                    if info is not None:
+                        print(
+                            f"[Stage1 down] {mode} accumulated scale="
+                            f"{info['dot_scale_least_squares']:.8g}, "
+                            f"double-dot residual max="
+                            f"{info['twice_dot_plus_bias_max_error']:.8g}, "
+                            f"mismatched="
+                            f"{info['twice_dot_plus_bias_mismatched']}/"
+                            f"{info['twice_dot_plus_bias_samples']}",
+                            flush=True,
+                        )
                 entry["vulkan_passed"] = entry["vulkan"]["mismatched"] == 0
                 print(
                     f"[Stage1 down] {mode} Vulkan: "
