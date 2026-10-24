@@ -118,6 +118,13 @@ Useful options:
 .\scripts\ci\build_and_prove_iree_wave32.ps1 -SkipProof
 ```
 
+Before Vulkan execution, the script now runs IREE's original six-case
+`config_default_reduction.mlir` fixture through the **just-built `iree-opt`**,
+checking that its translation metadata requests the correct 16-, 32-, and
+64-lane widths. This does not require the full LLVM testing infrastructure;
+the compiler's resulting MLIR is retained as
+`iree-wave32-v3.13.0-build/corridorkey-subgroup-config.mlir`.
+
 The script refuses to use a checkout at any revision other than `v3.13.0`,
 refuses to consider the compiler patched without both corrected call
 sites, verifies that Python resolves the *built* compiler rather than
