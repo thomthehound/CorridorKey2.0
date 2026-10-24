@@ -93,6 +93,79 @@ for the complete trained graph on the physical AMD device.** Compare its
 device results and performance with the failing native baseline before
 claiming a fix.
 
+## Subgroup-size consistency: primary root-cause hypothesis
+
+An especially strong candidate is a mismatch between IREE's assumed
+subgroup width during GPU reduction lowering and the width executed by
+the Vulkan implementation. IREE's RDNA GPU target prefers 32 lanes, while
+its own upstream comments note that Vulkan commonly prefers 64. If a
+cross-subgroup reduction treats a 64-lane hardware subgroup as two 32-lane
+groups, a partial can be accumulated twice. This accounts for the
+observed 2x factor, but **is not yet proven**.
+
+The source code of **IREE v3.13.0** narrows the failure modes:
+- `compiler/src/iree/compiler/Codegen/SPIRV/ConvertToSPIRV.cpp`
+  writes the selected dispatch subgroup size, when present, into
+  `spirv.entry_point_abi`.
+- `compiler/plugins/target/VulkanSPIRV/VulkanSPIRVTarget.cpp`
+  serializes that value into the Vulkan `PipelineDef.subgroup_size` field;
+  absent subgroup-size metadata becomes zero.
+- `runtime/src/iree/hal/drivers/vulkan/executable.c` validates nonzero
+  requests and passes
+  `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` at compute
+  pipeline creation. Hence **IREE already knows how to request a required
+  subgroup size**. The open question is whether the failing kernels
+  actually carry one and whether the driver honors it.
+
+Upstream source reference at IREE's v3.13.0 tag:
+https://github.com/iree-org/iree/blob/v3.13.0/runtime/src/iree/hal/drivers/vulkan/executable.c
+
+To collect device capabilities, individual generated dispatch MLIR/SPIR-V,
+and a channel-by-channel multiplicity map using **the same native kernel
+input shape** as the existing reduction sweep:
+
+```powershell
+python scripts/ci/prove_vulkan_reductions.py `
+  --widths 128,192,256,512 `
+  --operations sum_square `
+  --target rdna3 --execute-vulkan `
+  --one-hot --record-subgroups --dump-executables `
+  --output build/subgroup-investigation
+```
+
+The command is expected to return nonzero when the native operator
+reproduces a GPU mismatch. It does **not** modify the checkpoint or
+inference graph. Share `build/subgroup-investigation/report.json`.
+The full device-probe output is retained as `vulkaninfo.txt` when the
+Vulkan SDK's `vulkaninfo` is installed. All executable dump artifacts
+remain beneath per-case `*_executables` subdirectories.
+
+Interpret the three facts separately:
+1. Vulkan's `subgroupSize`, min/max subgroup sizes, and
+   `requiredSubgroupSizeStages` describe the **device**.
+2. IREE's `subgroup_size` in executable IR describes the **compiler
+   dispatch choice**. It does not alone prove the value made it into
+   the VMFB and pipeline stage.
+3. A runtime `PipelineDef.subgroup_size` of zero requests **no** fixed
+   subgroup width; a nonzero value is translated to the Vulkan
+   required-subgroup-size pipeline metadata by IREE 3.13. The VMFB
+   field or runtime Vulkan pipeline trace is ultimately authoritative.
+
+A 32-versus-64 discrepancy with *no* required subgroup size would
+strongly support this hypothesis. If the pipeline explicitly and
+successfully requests subgroup size 32, then a simple omitted-request
+explanation is insufficient; investigate invalid subgroup lowering or
+driver execution before claiming a root cause. If the compiled
+configuration is 64, the assumed-32 hypothesis for that dispatch is
+falsified.
+
+The one-hot experiment reports the **multiplicity of every input
+channel** (expected 1, observed near 2 where double counted), allowing
+full duplication to be distinguished from tail/lane masking defects,
+including the input-dependent 192-channel case. Cross-driver and
+32/64 configuration tests should follow this evidence, not precede it.
+Do not change numeric tolerances or divide model outputs by two.
+
 ## Root-cause hypotheses (unresolved)
 
 1. **IREE lowering/tiling of wide reductions or matmuls.** The repeated 2× accumulation with both convolution and independent GEMM is consistent with duplicate contribution, lane/subgroup reuse, or a malformed reduction tree. These are hypotheses, not observations of generated machine code.
