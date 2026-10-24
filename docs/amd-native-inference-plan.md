@@ -278,3 +278,26 @@ network or replacement attention implementation is used. Inspect
 `report.json` and the saved CPU/Vulkan intermediate tensors to
 identify the first divergent operation. CPU probe mapping is exercised
 on the small source-derived fixture in both CI environments.
+
+
+## Isolated production-width RMSNorm validation
+
+When the first transformer block's input agrees but `pre0_norm1`
+diverges, isolate that original normalization from the rest of Stage2.
+The following test loads the trained block 0 normalization parameters,
+captures the exact source input from the trained model, and compiles
+both native-rank and flattened-token views of the same source RMSNorm:
+
+```powershell
+python scripts/ci/prove_checkpoint_rmsnorm.py --checkpoint weights/corridorkey_v2.safetensors --height 64 --width 64 --target rdna1 --execute-vulkan --output build/checkpoint-rmsnorm
+```
+
+The source output is checked against the flattened-token source output
+at zero tolerance before either is exported; exported CPU inference
+is independently compared to the source. Both Vulkan executions must
+meet the existing `3e-3` absolute/relative gate. The command records
+per-variant differences and the actual input/CPU/Vulkan tensors, so a
+failure is evidence of a particular backend operation rather than a
+reason to loosen the threshold. The source-derived 1280-wide fixture
+is compiled for RDNA1 on Windows and executed on software Vulkan on
+Linux CI without downloading trained weights.

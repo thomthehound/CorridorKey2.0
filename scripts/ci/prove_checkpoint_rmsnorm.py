@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""Isolate the original Stage2 first-block RMSNorm for IREE Vulkan validation.
+
+Run the exact learned first-block normalization and its actual CPU input when
+--checkpoint is given. Separately test a nontrivial 1280-channel source module
+without needing pretrained weights. Both native-rank and 2D token-major views
+preserve the same source RMSNorm and learned affine weights.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import traceback
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+import numpy as np
+import torch
+
+from prove_iree_vulkan import _read_device_result, _rms_norm_inference_math
+
+
+class FlatRMSNorm(torch.nn.Module):
+    """Reshape only the leading dimensions of the unchanged source RMSNorm."""
+
+    def __init__(self, source):
+        super().__init__()
+        self.source = source
+
+    def forward(self, x):
+        return self.source(x.reshape(-1, x.shape[-1])).reshape(x.shape)
+
+
+def build_source(checkpoint: Path | None, height: int, width: int):
+    if checkpoint is None:
+        from corridorkey.blocks import RMSNorm
+
+        torch.manual_seed(1942)
+        normalized = RMSNorm(1280).eval()
+        with torch.no_grad():
+            normalized.weight.copy_(
+                torch.linspace(0.6, 1.4, normalized.weight.numel())
+            )
+        sample = torch.randn(1, height // 16, width // 16, 1280)
+        return normalized, sample
+
+    # Capture the trained input at the beginning of the exact original block.
+    from prove_checkpoint_stage2 import load_checkpoint_stage2
+
+    torch.manual_seed(1942)
+    stage2, config, _manifest, _count = load_checkpoint_stage2(checkpoint)
+    rgb = torch.randn(1, 1, 3, height, width)
+    baton = torch.randn(1, 1, config["d_16"], height // 16, width // 16)
+    inputs = []
+
+    def capture(_module, args):
+        inputs.append(args[0].detach().clone())
+
+    handle = stage2.pre_blocks[0].norm1.register_forward_pre_hook(capture)
+    try:
+        with torch.inference_mode():
+            stage2(rgb, baton)
+    finally:
+        handle.remove()
+    if len(inputs) != 1:
+        raise AssertionError(
+            f"Expected one first-block RMSNorm invocation, found {len(inputs)}"
+        )
+    return stage2.pre_blocks[0].norm1.eval(), inputs[0]
+
+
+def run(args):
+    args.output.mkdir(parents=True, exist_ok=True)
+    report = {
+        "scope": "original Stage2 first-block RMSNorm source module",
+        "checkpoint": str(args.checkpoint) if args.checkpoint else None,
+        "shape": [1, args.height // 16, args.width // 16, 1280],
+        "target": args.target,
+        "execute_vulkan": args.execute_vulkan,
+        "cases": [],
+    }
+    try:
+        module, sample = build_source(args.checkpoint, args.height, args.width)
+        report["shape"] = list(sample.shape)
+        np.save(args.output / "input.npy", sample.detach().numpy())
+        with torch.inference_mode():
+            reference = module(sample).detach().numpy()
+            flattened_reference = FlatRMSNorm(module)(sample).detach().numpy()
+        np.testing.assert_allclose(
+            flattened_reference, reference, atol=0.0, rtol=0.0,
+            err_msg="Reshaping the original RMSNorm changed source inference",
+        )
+        np.save(args.output / "source.npy", reference)
+
+        import iree.turbine.aot as aot
+
+        for kind, variant in (
+            ("native_rank", module),
+            ("flat_tokens", FlatRMSNorm(module)),
+        ):
+            entry = {"kind": kind, "compile": False, "numerical_match": None}
+            report["cases"].append(entry)
+            try:
+                exported = torch.export.export(
+                    variant, (sample,), strict=True,
+                ).run_decompositions({
+                    torch.ops.aten.rms_norm.default: _rms_norm_inference_math,
+                })
+                with torch.inference_mode():
+                    cpu_exported = exported.module()(sample).detach().numpy()
+                np.testing.assert_allclose(
+                    cpu_exported, reference, rtol=2e-5, atol=2e-5,
+                    err_msg=f"{kind}: source/export CPU disagreement",
+                )
+                compiled = aot.export(exported)
+                compiled.verify()
+                compiled.save_mlir(args.output / f"{kind}.mlir")
+                compiled.session.set_flags(
+                    f"--iree-vulkan-target={args.target}"
+                )
+                compiled.session.set_flags("--iree-opt-level=O2")
+                vmfb = args.output / f"{kind}.vmfb"
+                compiled.compile(
+                    save_to=vmfb, target_backends=["vulkan-spirv"],
+                )
+                entry["compile"] = True
+                print(f"[rmsnorm] {kind}: Vulkan compile passed", flush=True)
+                if not args.execute_vulkan:
+                    continue
+
+                import iree.runtime as rt
+
+                config = rt.Config("vulkan")
+                binary = rt.VmModule.copy_buffer(
+                    config.vm_instance, vmfb.read_bytes(),
+                )
+                program = rt.load_vm_module(binary, config)
+                result = program.main(
+                    rt.asdevicearray(config.device, sample.detach().numpy()),
+                )
+                if isinstance(result, (tuple, list)):
+                    if len(result) != 1:
+                        raise AssertionError("Expected one normalization result")
+                    result = result[0]
+                actual = _read_device_result(config, result)
+                np.save(args.output / f"{kind}_vulkan.npy", actual)
+                if actual.shape != reference.shape or not np.isfinite(actual).all():
+                    raise AssertionError("Unexpected shape or nonfinite Vulkan tensor")
+                difference = np.abs(actual - reference)
+                mismatched = int(np.count_nonzero(~np.isclose(
+                    actual, reference, atol=3e-3, rtol=3e-3,
+                )))
+                entry.update({
+                    "max_absolute_error": float(difference.max()),
+                    "mean_absolute_error": float(difference.mean()),
+                    "mismatched": mismatched,
+                    "numerical_match": mismatched == 0,
+                })
+                print(
+                    f"[rmsnorm] {kind}: max={entry['max_absolute_error']:.8g} "
+                    f"mean={entry['mean_absolute_error']:.8g} "
+                    f"mismatched={mismatched}",
+                    flush=True,
+                )
+            except Exception as exc:
+                entry["error"] = f"{type(exc).__name__}: {exc}"
+                entry["traceback"] = traceback.format_exc()
+                print(entry["traceback"], file=sys.stderr, flush=True)
+    except Exception as exc:
+        report["error"] = f"{type(exc).__name__}: {exc}"
+        report["traceback"] = traceback.format_exc()
+        print(report["traceback"], file=sys.stderr, flush=True)
+    finally:
+        (args.output / "report.json").write_text(
+            json.dumps(report, indent=2) + "\n", encoding="utf-8",
+        )
+    return int(
+        "error" in report or any(
+            "error" in item or item["numerical_match"] is False
+            for item in report["cases"]
+        )
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--height", type=int, default=64)
+    parser.add_argument("--width", type=int, default=64)
+    parser.add_argument("--target", default="rdna1")
+    parser.add_argument("--execute-vulkan", action="store_true")
+    parser.add_argument("--output", type=Path, default=Path("build/rmsnorm-proof"))
+    args = parser.parse_args()
+    if args.height <= 0 or args.width <= 0 or (
+        args.height % 16 or args.width % 16
+    ):
+        parser.error("Image dimensions must be positive multiples of 16")
+    if args.checkpoint is not None and not args.checkpoint.is_file():
+        parser.error(f"Checkpoint not found: {args.checkpoint}")
+    return run(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

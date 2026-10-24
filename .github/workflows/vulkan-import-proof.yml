@@ -121,6 +121,15 @@ jobs:
             python scripts/ci/prove_stage2_vulkan.py --output build/stage2-proof --target rdna1
           fi
 
+      - name: Compile production-width RMSNorm source module
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            python scripts/ci/prove_checkpoint_rmsnorm.py --output build/rmsnorm-proof --target llvmpipe --execute-vulkan
+          else
+            python scripts/ci/prove_checkpoint_rmsnorm.py --output build/rmsnorm-proof --target rdna1
+          fi
+
       - name: Verify Stage2 diagnostic probe selection
         shell: bash
         run: |
@@ -143,5 +152,6 @@ jobs:
             build/stage2-proof/
             build/stage2-diagnostic/
             build/stage1-proof/
+            build/rmsnorm-proof/
           if-no-files-found: warn
           retention-days: 7
