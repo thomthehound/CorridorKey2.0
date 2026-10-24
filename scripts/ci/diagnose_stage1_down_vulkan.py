@@ -98,6 +98,38 @@ class DownsampleVariant(torch.nn.Module):
         )
 
 
+
+def self_test_spatial():
+    """Verify spatial gather order against the original convolution geometry."""
+    torch.manual_seed(20261024)
+    conv = torch.nn.Conv2d(8, 8, kernel_size=8, stride=4, padding=2).eval()
+    cases = ((4, 4), (4, 8), (8, 4), (8, 8), (12, 12))
+    for height, width in cases:
+        x = torch.randn(2, 8, height, width)
+        with torch.inference_mode():
+            expected = conv(x).numpy()
+        modes = ("spatial", "crop4", "gemm4") if (
+            height, width
+        ) == (4, 4) else ("spatial",)
+        for mode in modes:
+            variant = DownsampleVariant(conv, mode).eval()
+            with torch.inference_mode():
+                direct = variant(x).numpy()
+                exported = torch.export.export(
+                    variant, (x,), strict=True
+                ).module()(x).detach().numpy()
+            np.testing.assert_allclose(
+                direct, expected, atol=2e-5, rtol=2e-5,
+                err_msg=f"{mode}: shape {(height, width)}",
+            )
+            np.testing.assert_allclose(
+                exported, expected, atol=2e-5, rtol=2e-5,
+                err_msg=f"{mode}: exported shape {(height, width)}",
+            )
+    print("[Stage1 down] source-equivalent spatial layouts pass CPU/export",
+          flush=True)
+
+
 def make_fixture():
     torch.manual_seed(20261024)
     conv = torch.nn.Conv2d(8, 8, kernel_size=8, stride=4, padding=2).eval()
@@ -266,6 +298,7 @@ def run(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--self-test-spatial", action="store_true")
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--height", type=int, default=64)
     parser.add_argument("--width", type=int, default=64)
@@ -280,6 +313,9 @@ def main():
     group.add_argument("--probe-only", action="store_true")
     group.add_argument("--import-only", action="store_true")
     args = parser.parse_args()
+    if args.self_test_spatial:
+        self_test_spatial()
+        return 0
     args.modes = tuple(part.strip() for part in args.modes.split(","))
     if not args.modes or any(
         part not in ("native", "im2col", "crop4", "gemm4", "spatial", "unfold")
