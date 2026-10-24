@@ -102,6 +102,12 @@ print("[trained wave32] Runtime version:", runtime, flush=True)
             "--linear-reduction", "native",
             "--output", $out
         )
+        # Auto is a fast correctness smoke test first. A failed native
+        # compile should not immediately recompile the same graph with
+        # instrumentation before the fallback is attempted.
+        if ($Mode -eq "Auto" -and $pass -eq "Native") {
+            $options += "--no-stage1-diagnostic"
+        }
         if ($pass -eq "Segmented") {
             $options = @(
                 $pipeline,
