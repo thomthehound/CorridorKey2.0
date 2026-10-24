@@ -273,6 +273,97 @@ turn the first into a blanket wave32 setting. Upstream PRs/issues are
 portable Windows repro. Keep repository handoff status current when
 upstream work proceeds.
 
+## Upstream duplication and maintainer preflight (2026-10-24)
+
+A search of IREE's current `main` code, open/closed issues, PRs and
+contribution guide found **related work, but none of these three
+specific correctness/build failures is currently fixed in `main`**.
+Repeat the issue/PR search when preparing each submission.
+
+1. **Subgroup bug — prior unmerged implementation:**
+   [IREE PR #25021](https://github.com/iree-org/iree/pull/25021),
+   closed unmerged October 11, 2026, contains the **same
+   `SubgroupReduce` missing required-size fix**, plus a mixed
+   `[32,64]` regression. The author withdrew it following a
+   contribution-policy compliance discussion, not a demonstrated
+   correctness rebuttal. It also tackles
+   [#18516](https://github.com/iree-org/iree/issues/18516) and
+   [#20318](https://github.com/iree-org/iree/issues/20318), separate
+   subgroup-reduction expansion cleanup tasks. **Our upstream fix
+   should remain narrowly scoped to correctness**, reference #25021
+   and credit prior discovery appropriately, and avoid broad unrelated
+   reduction-pipeline changes.
+
+   **Required refinement of our local v3.13 patch:** #25021 records
+   `requestedSubgroupSize` **only for a target advertising multiple
+   supported subgroup widths**. Our current local patch sets it
+   unconditionally. Requesting a size unnecessarily can fail on
+   fixed-width Vulkan devices without subgroup-size-control support.
+   Rework the upstream patch with a fixed-width negative test and a
+   mixed-width positive test. Do not modify the already-proven local
+   compiler build until a separate regression pass validates the
+   portable upstream change.
+
+   Related but different:
+   [issue #24688](https://github.com/iree-org/iree/issues/24688)
+   concerns dangerous Vulkan default-target assumptions;
+   [draft PR #24726](https://github.com/iree-org/iree/pull/24726)
+   addresses the default-target policy, not these two translation
+   call sites.
+
+2. **Windows Python invocation:** no matching existing patch located
+   for the generated genrule commands' literal `python3`.
+   [#18813](https://github.com/iree-org/iree/issues/18813) discusses
+   Windows CI frequency/infrastructure rather than our selected-Python
+   failure. Earlier [PR #18370](https://github.com/iree-org/iree/pull/18370)
+   and [PR #11696](https://github.com/iree-org/iree/pull/11696) deal
+   with interpreter discovery/pinning but do not remove the hard-coded
+   command. Current `main` still embeds literal `python3` in the
+   generated VM ISA and plugin ABI rules.
+
+3. **Vulkan Python readback alignment:** merged
+   [PR #23792](https://github.com/iree-org/iree/pull/23792)
+   introduced the host-import-based `DeviceArray._copy_to_host`
+   path. Its review **explicitly discussed Vulkan support** and added
+   allocator compatibility queries, but missed the fact that
+   `IMPORTABLE` does not guarantee a NumPy allocation satisfies
+   pointer/length alignment. Historical
+   [issue #7242](https://github.com/iree-org/iree/issues/7242)
+   already discussed Vulkan host import alignment and safe fallback.
+   [PR #24737](https://github.com/iree-org/iree/pull/24737) changes
+   Vulkan extension-function availability, **not** Python's pointer
+   alignment. The erroneous `np.empty` import branch is present in
+   current `main`. Reference #23792 and #7242 when filing the
+   focused runtime correction, avoiding a duplicated general
+   feature request.
+
+**Contributor/review protocol:** read the current
+[IREE contribution guide](https://iree.dev/developers/general/contributing/)
+and [CODEOWNERS](https://github.com/iree-org/iree/blob/main/.github/CODEOWNERS)
+before opening PRs. The project requires a DCO `Signed-off-by`
+trailer on commits from non-organization members, focused changes,
+in-tree regression tests, addressed review comments and typically
+squash merges. New contributors may need a maintainer to authorize
+CI runs; `ci-extra: windows_x64_msvc` can opt into Windows coverage.
+Their contributor rules also include specialized restrictions for
+`good first issue` work: do not associate a narrow independent
+correctness repair with an unrelated newcomer cleanup ticket without
+clarifying the scope first. Refer to official current policies for
+all contribution-origin declarations and acknowledgments.
+
+**Evidence custody:** CorridorKey's repo contains the versioned fix,
+scripts, test fixture, handoff and CI records. The raw successful
+Radeon reduction JSON and combined native replay report are
+user-generated artifacts from the physical machine, **not
+public upstream attachments**; copy/sanitize the relevant results
+and hardware properties before creating PRs. The passing combined
+report path is
+`build/trained-patched-iree/native/execution-replay-2/report.json`.
+CorridorKey CI run
+[190](https://github.com/thomthehound/CorridorKey2.0/actions/runs/40126750060)
+completed successfully on both Windows and Ubuntu. These CI jobs do
+not replace the user's physical Radeon proof.
+
 ### Preservation and handoff checklist
 
 - Do not delete `F:\dev\iree-wave32-v3.13.0-build`; the successfully
