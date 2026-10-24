@@ -206,6 +206,20 @@ try {
         Remove-Item Env:\CORRIDORKEY_EXPECTED_COMPILER -ErrorAction SilentlyContinue
     }
 
+    # The upstream six-case reduction fixture is checked with the built
+    # iree-opt, not LLVM FileCheck. This verifies compiler configuration
+    # metadata without enabling the full native LLVM test suite.
+    $optBinary = Join-Path $compilerBindings "iree\compiler\_mlir_libs\iree-opt.exe"
+    if (-not (Test-Path -LiteralPath $optBinary -PathType Leaf)) {
+        $optBinary = Join-Path $compilerBindings "iree\compiler\_mlir_libs\iree-opt"
+    }
+    $fixture = Join-Path $SourceDir "compiler\src\iree\compiler\Codegen\SPIRV\test\config_default_reduction.mlir"
+    $verifyFixture = Join-Path $repoRoot "scripts\ci\verify_iree_subgroup_codegen.py"
+    Invoke-Checked "python" @(
+        $verifyFixture, "--iree-opt", $optBinary, "--source", $fixture,
+        "--output", (Join-Path $BuildDir "corridorkey-subgroup-config.mlir")
+    )
+
     if ($SkipProof) {
         Write-Host "[wave32] Build/import verification passed; proof skipped."
         return
