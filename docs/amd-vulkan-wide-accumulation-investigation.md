@@ -98,7 +98,7 @@ claiming a fix.
 An especially strong candidate is a mismatch between IREE's assumed
 subgroup width during GPU reduction lowering and the width executed by
 the Vulkan implementation. IREE's RDNA GPU target prefers 32 lanes, while
-its own upstream comments note that Vulkan commonly prefers 64. If a
+the compiler source notes that Vulkan commonly prefers 64. If a
 cross-subgroup reduction treats a 64-lane hardware subgroup as two 32-lane
 groups, a partial can be accumulated twice. This accounts for the
 observed 2x factor, but **is not yet proven**.
@@ -117,8 +117,7 @@ The source code of **IREE v3.13.0** narrows the failure modes:
   subgroup size**. The open question is whether the failing kernels
   actually carry one and whether the driver honors it.
 
-Upstream source reference at IREE's v3.13.0 tag:
-https://github.com/iree-org/iree/blob/v3.13.0/runtime/src/iree/hal/drivers/vulkan/executable.c
+Implementation reference: `runtime/src/iree/hal/drivers/vulkan/executable.c` in the tested compiler/runtime source tree.
 
 To collect device capabilities, individual generated dispatch MLIR/SPIR-V,
 and a channel-by-channel multiplicity map using **the same native kernel
@@ -247,7 +246,7 @@ No evidence presently attributes the defect to DXC. IREE's Vulkan backend emits 
 - **Cross-implementation reproduction:** Where available, execute the same kernel/VMFB on AMD's proprietary Vulkan driver, Mesa RADV, and software Vulkan (lavapipe). Record precisely which backends pass/fail; software Vulkan is not a substitute for physical AMD hardware validation.
 - **Minimal reproducer:** Reduce the 8,192-element dot and 1,280-element squared reduction to deterministic small standalone models with known analytic answers and explicit runtime operands. Sweep widths, shape/stride, output channels, and scalar/subgroup/tiling choices.
 - **Compiler evidence:** Save imported Torch-MLIR, optimized IREE IR, generated SPIR-V, dispatch metadata, and (where tooling permits) driver ISA. Compare passing 128-element segments with failing unsegmented dispatches for duplicate accumulation, incorrect lane masks, and buffer indexing.
-- **Upstream fix:** Locate the first incorrect compiler/runtime stage or driver transformation; report an upstream bug only with reproducible input, version/driver matrix, IR/SPIR-V and actual/expected values. Prefer a reusable compiler/backend correction over a CorridorKey-specific numerical patch.
+- **Correctness fix:** Locate the first incorrect compiler/runtime stage or driver transformation; report an upstream bug only with reproducible input, version/driver matrix, IR/SPIR-V and actual/expected values. Prefer a reusable compiler/backend correction over a CorridorKey-specific numerical patch.
 - **Regression/performance:** Add a targeted GPU correctness regression covering widths on both sides of the failure and production checkpoint profiles. Compare corrected native reductions against segmented source-equivalent lowerings for latency, throughput, allocation, and memory bandwidth. Keep source-faithful segmented lowerings opt-in until representative trained-graph correctness and performance are demonstrated.
 
 **Success criterion:** Source-equivalent full-width operations compile and execute correctly on supported AMD Vulkan drivers, with a verified root cause and regression tests. The segmented implementations remain reproducible correctness controls and must not be silently replaced by a multiplicative output correction.
