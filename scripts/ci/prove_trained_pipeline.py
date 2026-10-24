@@ -16,6 +16,8 @@ import sys
 import traceback
 from pathlib import Path
 
+from collect_pipeline_diagnostics import BUNDLE_NAME, write_bundle
+
 
 SCRIPTS = Path(__file__).resolve().parent
 
@@ -36,6 +38,15 @@ def read_report(path):
 
 def run(args):
     args.output.mkdir(parents=True, exist_ok=True)
+    # A subsequent run may end at an earlier stage. Never collect stale
+    # report.json files from a previous attempt as evidence for this run.
+    for relative in (
+        "report.json", "stage1/report.json",
+        "stage1_diagnostic/report.json", "stage2/report.json",
+        "execution/report.json",
+    ):
+        (args.output / relative).unlink(missing_ok=True)
+    (args.output / BUNDLE_NAME).unlink(missing_ok=True)
     stage1_dir = args.output / "stage1"
     stage2_dir = args.output / "stage2"
     execution_dir = args.output / "execution"
@@ -152,6 +163,19 @@ def run(args):
         (args.output / "report.json").write_text(
             json.dumps(report, indent=2) + "\n", encoding="utf-8"
         )
+        # The single shareable report includes every available child
+        # report, even when Stage1 or Stage2 aborts the pipeline early.
+        try:
+            bundle_path = write_bundle(args.output)
+            print(
+                f"[trained pipeline] Share this one file: {bundle_path}",
+                flush=True,
+            )
+        except Exception as bundle_exc:
+            print(
+                "[trained pipeline] Could not consolidate reports: "
+                f"{bundle_exc}", file=sys.stderr, flush=True,
+            )
     return int("error" in report)
 
 
