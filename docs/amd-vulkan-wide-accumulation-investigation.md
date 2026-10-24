@@ -166,6 +166,72 @@ including the input-dependent 192-channel case. Cross-driver and
 32/64 configuration tests should follow this evidence, not precede it.
 Do not change numeric tolerances or divide model outputs by two.
 
+## Physical AMD wave32 compatibility and one-hot duplication map (26.10.1)
+
+The new driver report identifies **AMD Radeon 8060S / proprietary LLPC 26.10.1**
+on Vulkan 1.4, running IREE compiler/runtime 3.13.0 and Turbine 3.9.0.
+`vulkaninfo.txt` confirms:
+
+- `subgroupSize = 64` (reported default)
+- `minSubgroupSize = 32`; `maxSubgroupSize = 64`
+- `subgroupSizeControl = true`
+- `requiredSubgroupSizeStages` includes `SHADER_STAGE_COMPUTE_BIT`
+- `computeFullSubgroups = true`
+
+Therefore the target **can request wave32 explicitly** using
+`VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` with
+`requiredSubgroupSize = 32`. IREE v3.13.0 already supports this at
+Vulkan pipeline creation **when** the serialized executable advertises
+a nonzero required subgroup size. Do not equate a default `64` reported
+by `vulkaninfo` with proof that the failing pipeline actually ran as wave64.
+
+The unchanged native `sum_square` source on this device yielded:
+
+| Width | Native GPU/CPU | One-hot contribution map | Distinctive detail |
+|---:|---:|---|---|
+| 128 | ~1 | 128 × 1 | Pass |
+| 192 | ~1.67, input-dependent | 128 × 2, then 64 × 1 | Exact positional transition |
+| 256 | ~2 | 256 × 2 | Every channel counted twice |
+| 512 | ~2 | 512 × 2 | Every channel counted twice |
+
+One-hot inputs produce deterministic 1s and 2s, not approximate
+floating-point drift, strongly favoring a deterministic lane-mask or
+partial-reduction duplication mechanism. This distribution is consistent
+with 32-versus-64 subgroup assumptions, but also with another faulty
+tile/partial reduction implementation; it alone does **not** attribute
+the bug to the AMD driver or IREE.
+
+The compiler dump recorded `SPIR-V 1.3` kernels. The first metadata
+collector reported **no extracted explicit subgroup sizes**, but this
+was inconclusive: it truncated `iree_codegen.dispatch_config` at its
+opening line and could not inspect the rest of the block. The updated
+inspector records complete dispatch configuration blocks and SPIR-V
+entry-point ABI lines. It distinguishes the target's allowed subgroup
+size choices (e.g. `[32, 64]`) from the selected required size.
+
+**No recompilation or GPU invocation is needed to inspect the existing
+dump artifacts**. After updating the checkout, run:
+
+```powershell
+python scripts/ci/prove_vulkan_reductions.py `
+  --inspect-only `
+  --output build/subgroup-investigation
+```
+
+This writes `build/subgroup-investigation/subgroup-inspection.json`
+containing the device property summary, the one-hot count summaries,
+complete compiled dispatch configurations and entry-point ABI evidence.
+The file's contents must be checked before concluding whether IREE
+requested 32. Further confirmation of the actual
+`PipelineDef.subgroup_size` value or a Vulkan pipeline-create trace
+will resolve the final runtime propagation question.
+
+If the failing dispatch's requested size is **zero**, requiring 32 is
+the highest priority native-operator fix. If it is **32**, forcing 32
+again cannot explain away the failure: investigate IREE reduction lowering
+or nonconforming driver execution. If **64**, reconcile the codegen
+subgroup and pipeline request without applying an output scaling patch.
+
 ## Root-cause hypotheses (unresolved)
 
 1. **IREE lowering/tiling of wide reductions or matmuls.** The repeated 2× accumulation with both convolution and independent GEMM is consistent with duplicate contribution, lane/subgroup reuse, or a malformed reduction tree. These are hypotheses, not observations of generated machine code.
