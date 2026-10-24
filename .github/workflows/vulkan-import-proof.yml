@@ -166,6 +166,7 @@ jobs:
       - name: Verify Stage1 downsample differential fixture
         shell: bash
         run: |
+          python scripts/ci/diagnose_stage1_down_vulkan.py --self-test-spatial --output build/stage1-down-probe
           python scripts/ci/diagnose_stage1_down_vulkan.py --probe-only --output build/stage1-down-probe
           python scripts/ci/diagnose_stage1_down_vulkan.py --import-only --modes native,crop4,gemm4,spatial --output build/stage1-down-import
 
