@@ -2,7 +2,7 @@
 """Differential Vulkan proof for the checkpoint's original Stage1 /16->/64 convolution.
 
 Runs the trained convolution with its actual source encoder activation. Compares
-native Conv2d with an equivalent unfold+matrix-multiply expression, without
+native Conv2d, compiler-side im2col, and equivalent unfold+matmul, without
 modifying checkpoint parameters or source-model inference.
 """
 
@@ -24,7 +24,7 @@ import torch.nn.functional as F
 class DownsampleVariant(torch.nn.Module):
     def __init__(self, conv: torch.nn.Conv2d, mode: str):
         super().__init__()
-        if mode not in ("native", "unfold"):
+        if mode not in ("native", "im2col", "unfold"):
             raise ValueError(f"Unknown convolution variant: {mode}")
         if mode == "unfold" and conv.groups != 1:
             raise ValueError("Unfold variant requires a non-grouped convolution")
@@ -32,7 +32,7 @@ class DownsampleVariant(torch.nn.Module):
         self.mode = mode
 
     def forward(self, x):
-        if self.mode == "native":
+        if self.mode in ("native", "im2col"):
             return self.conv(x)
         conv = self.conv
         patches = F.unfold(
@@ -168,6 +168,10 @@ def run(args):
                     continue
                 compiled.session.set_flags(f"--iree-vulkan-target={args.target}")
                 compiled.session.set_flags("--iree-opt-level=O2")
+                if mode == "im2col":
+                    compiled.session.set_flags(
+                        "--iree-global-opt-use-im2col-for-convs=true"
+                    )
                 vmfb = args.output / f"{mode}.vmfb"
                 compiled.compile(save_to=vmfb, target_backends=["vulkan-spirv"])
                 entry["compiled"] = True
@@ -228,8 +232,8 @@ def main():
     parser.add_argument("--frames", type=int, default=1)
     parser.add_argument("--target", default="rdna3")
     parser.add_argument(
-        "--modes", default="native,unfold",
-        help="Comma-separated variants: native,unfold",
+        "--modes", default="native,im2col,unfold",
+        help="Comma-separated variants: native,im2col,unfold",
     )
     parser.add_argument("--output", type=Path, required=True)
     group = parser.add_mutually_exclusive_group()
@@ -238,9 +242,9 @@ def main():
     args = parser.parse_args()
     args.modes = tuple(part.strip() for part in args.modes.split(","))
     if not args.modes or any(
-        part not in ("native", "unfold") for part in args.modes
+        part not in ("native", "im2col", "unfold") for part in args.modes
     ) or len(set(args.modes)) != len(args.modes):
-        parser.error("--modes must select unique members of native,unfold")
+        parser.error("--modes must select unique members of native,im2col,unfold")
     if args.checkpoint and not args.checkpoint.is_file():
         parser.error(f"Checkpoint not found: {args.checkpoint}")
     if args.frames < 1 or args.height < 1 or args.width < 1 or (
