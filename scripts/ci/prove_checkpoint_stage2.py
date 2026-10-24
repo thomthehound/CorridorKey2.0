@@ -159,6 +159,18 @@ def self_test():
             torch.testing.assert_close(loaded.state_dict()[name], tensor,
                                        atol=0.0, rtol=0.0)
 
+        # This path must work with no IREE compiler installed.
+        cpu_args = argparse.Namespace(
+            checkpoint=checkpoint, output=Path(tmp) / "cpu-only",
+            height=32, width=32, compile=False,
+            execute_vulkan=False, target="rdna1", rms_reduction="native",
+            rgb_input=None, baton_input=None,
+        )
+        if run(cpu_args) != 0:
+            raise AssertionError("CPU-only checkpoint inference failed")
+        if "iree" in sys.modules:
+            raise AssertionError("CPU-only checkpoint inference imported IREE")
+
         missing = dict(state)
         missing.pop(next(iter(missing)))
         save_file(missing, str(checkpoint), metadata=metadata)
@@ -172,8 +184,6 @@ def self_test():
 
 
 def run(args) -> int:
-    from prove_stage2_vulkan import ChannelLastStage2Result, export_stage2
-
     args.output.mkdir(parents=True, exist_ok=True)
     report = {
         "checkpoint": str(args.checkpoint),
@@ -185,6 +195,7 @@ def run(args) -> int:
         "vulkan_execute": False,
         "image_height": args.height,
         "image_width": args.width,
+        "rms_reduction": args.rms_reduction,
     }
     try:
         torch.manual_seed(1942)
@@ -198,9 +209,33 @@ def run(args) -> int:
         report["stage2_blocks"] = config["n_blocks_stage2"]
 
         height, width = args.height, args.width
-        rgb = torch.randn(1, 1, 3, height, width)
-        baton = torch.randn(1, 1, config["d_16"], height // 16, width // 16)
-        model = ChannelLastStage2Result(stage2).eval()
+        if args.rgb_input is not None:
+            rgb_array = np.load(args.rgb_input, allow_pickle=False)
+            baton_array = np.load(args.baton_input, allow_pickle=False)
+            if (
+                rgb_array.shape != (1, 1, 3, height, width)
+                or baton_array.shape != (
+                    1, 1, config["d_16"], height // 16, width // 16
+                )
+                or rgb_array.dtype != np.float32
+                or baton_array.dtype != np.float32
+                or not np.isfinite(rgb_array).all()
+                or not np.isfinite(baton_array).all()
+            ):
+                raise ValueError(
+                    "External Stage1->Stage2 input ABI differs from checkpoint"
+                )
+            rgb = torch.from_numpy(np.ascontiguousarray(rgb_array))
+            baton = torch.from_numpy(np.ascontiguousarray(baton_array))
+            report["source_input"] = "external Stage1 baton and RGB"
+        else:
+            rgb = torch.randn(1, 1, 3, height, width)
+            baton = torch.randn(
+                1, 1, config["d_16"], height // 16, width // 16
+            )
+            report["source_input"] = "deterministic random reference fixture"
+        np.save(args.output / "input_rgb.npy", rgb.numpy())
+        np.save(args.output / "input_baton.npy", baton.numpy())
         with torch.inference_mode():
             source = _as_arrays(stage2(rgb, baton))
         for index, value in enumerate(source):
@@ -213,9 +248,22 @@ def run(args) -> int:
               f"source output shapes={report['source_shapes']}", flush=True)
 
         if args.compile:
-            import iree.turbine.aot as aot
+            try:
+                import iree.turbine.aot as aot
+            except ModuleNotFoundError as exc:
+                if exc.name == "iree" or exc.name.startswith("iree."):
+                    raise RuntimeError(
+                        "Vulkan compilation requires iree-turbine. "
+                        "Run: python scripts/setup_amd_importer.py --profile vulkan"
+                    ) from exc
+                raise
+            from prove_stage2_vulkan import ChannelLastStage2Result, export_stage2
 
-            exported, specialized = export_stage2(model, rgb, baton)
+            model = ChannelLastStage2Result(stage2).eval()
+
+            exported, specialized = export_stage2(
+                model, rgb, baton, rms_reduction=args.rms_reduction
+            )
             with torch.inference_mode():
                 output = _as_arrays(exported.module()(rgb, baton))
             output = tuple(t.transpose(0, 1, 4, 2, 3).copy() for t in output)
@@ -257,11 +305,24 @@ def run(args) -> int:
                     .transpose(0, 1, 4, 2, 3).copy()
                     for t in result
                 )
+                # Preserve divergent outputs and error statistics even when
+                # the Vulkan numerical assertion fails.
+                for index, value in enumerate(actual):
+                    np.save(args.output / f"vulkan_{index}.npy", value)
+                report["vulkan_error_stats"] = [
+                    {
+                        "output": index,
+                        "max_absolute_error": float(np.max(np.abs(a - b))),
+                        "mean_absolute_error": float(np.mean(np.abs(a - b))),
+                        "mismatched": int(np.sum(~np.isclose(
+                            a, b, atol=3e-3, rtol=3e-3,
+                        ))),
+                    }
+                    for index, (a, b) in enumerate(zip(actual, source))
+                ]
                 report["vulkan_errors"] = _assert_reference(
                     actual, source, "Vulkan Stage2",
                 )
-                for index, value in enumerate(actual):
-                    np.save(args.output / f"vulkan_{index}.npy", value)
                 report["vulkan_execute"] = True
                 print("[checkpoint Stage2] trained Vulkan graph matches source",
                       flush=True)
@@ -286,7 +347,21 @@ def main() -> int:
     parser.add_argument("--width", type=int, default=64)
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--execute-vulkan", action="store_true")
+    parser.add_argument(
+        "--rgb-input", type=Path,
+        help="Use the Stage1 proof's input_0.npy RGB in place of random RGB",
+    )
+    parser.add_argument(
+        "--baton-input", type=Path,
+        help="Use the Stage1 proof's source_0.npy baton as the Stage2 input",
+    )
     parser.add_argument("--target", default="rdna1")
+    parser.add_argument(
+        "--rms-reduction", choices=("native", "segmented128"),
+        default="native",
+        help="Opt into source-equivalent segmented RMSNorm for Vulkan "
+             "compilation; native retains the original failure baseline",
+    )
     args = parser.parse_args()
     if args.self_test:
         self_test()
@@ -301,6 +376,11 @@ def main() -> int:
         parser.error("--height and --width must be positive multiples of 16")
     if args.execute_vulkan and not args.compile:
         parser.error("--execute-vulkan requires --compile")
+    if (args.rgb_input is None) != (args.baton_input is None):
+        parser.error("--rgb-input and --baton-input must be specified together")
+    for source_path in (args.rgb_input, args.baton_input):
+        if source_path is not None and not source_path.is_file():
+            parser.error(f"Input file does not exist: {source_path}")
     return run(args)
 
 

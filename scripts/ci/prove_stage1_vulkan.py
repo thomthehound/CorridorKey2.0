@@ -21,7 +21,8 @@ import numpy as np
 import torch
 
 from prove_iree_vulkan import (
-    _read_device_result, _rms_norm_inference_math, _sdpa_inference_math,
+    _read_device_result, _rms_norm_inference_math,
+    _rms_norm_segmented_128_math, _sdpa_inference_math,
 )
 
 
@@ -121,7 +122,17 @@ def create_stage1():
     return Stage1OutputABI(model).eval(), args, expected
 
 
-def export_stage1(model, args):
+def export_stage1(model, args, *, rms_reduction="native",
+                  down_reduction="native", fuse_reduction="native",
+                  linear_reduction="native"):
+    if rms_reduction not in ("native", "segmented128"):
+        raise ValueError(f"Unsupported Stage1 RMSNorm lowering: {rms_reduction}")
+    if down_reduction not in ("native", "segmented128"):
+        raise ValueError(f"Unsupported Stage1 downsample lowering: {down_reduction}")
+    if fuse_reduction not in ("native", "segmented128"):
+        raise ValueError(f"Unsupported Stage1 fusion lowering: {fuse_reduction}")
+    if linear_reduction not in ("native", "segmented128"):
+        raise ValueError(f"Unsupported Stage1 linear lowering: {linear_reduction}")
     import corridorkey.blocks as blocks
 
     # Evaluate the source's static shifted-region cache on CPU for this
@@ -155,35 +166,67 @@ def export_stage1(model, args):
     # are restored immediately after graph capture.
     with torch.inference_mode():
         authoritative = tuple(t.detach().numpy().copy() for t in model(*args))
-    saved = []
-    for parent in list(model.named_modules()):
-        module = parent[1]
-        for name, child in list(module.named_children()):
-            if isinstance(child, blocks.RMSNorm):
-                saved.append((module, name, child))
-                setattr(module, name, FlattenedStage1RMSNorm(child))
-    if not saved:
-        raise AssertionError("Expected source Stage1 RMSNorm layers")
+    saved_down = None
+    saved_fuse = []
+    saved_linears = []
+    saved_norm = []
     blocks._shifted_region_groups_3d_cached = fixed
     try:
+        if down_reduction == "segmented128":
+            from stage1_down_lowering import SegmentedStage1DownConv
+
+            original_down = model.source.down.conv
+            if not isinstance(original_down, torch.nn.Conv2d):
+                raise TypeError("Expected original Stage1 downsample Conv2d")
+            saved_down = original_down
+            model.source.down.conv = SegmentedStage1DownConv(original_down)
+        if fuse_reduction == "segmented128":
+            from stage1_linear_lowering import wrap_fusion_projections
+            saved_fuse = wrap_fusion_projections(model.source.fuse)
+        if linear_reduction == "segmented128":
+            from stage1_linear_lowering import wrap_wide_stage1_linears
+            saved_linears = wrap_wide_stage1_linears(model.source)
+
+        for _, module in list(model.named_modules()):
+            for name, child in list(module.named_children()):
+                if isinstance(child, blocks.RMSNorm):
+                    saved_norm.append((module, name, child))
+                    setattr(module, name, FlattenedStage1RMSNorm(child))
+        if not saved_norm:
+            raise AssertionError("Expected source Stage1 RMSNorm layers")
+
         with torch.inference_mode():
             flattened = tuple(t.detach().numpy() for t in model(*args))
+        tolerance = (
+            2e-5 if down_reduction == "segmented128"
+            or fuse_reduction == "segmented128"
+            or linear_reduction == "segmented128" else 1e-6
+        )
         for index, (reference, actual) in enumerate(zip(authoritative, flattened)):
             np.testing.assert_allclose(
-                actual, reference, atol=1e-6, rtol=1e-6,
-                err_msg=f"Flattened Stage1 RMSNorm changed source output {index}",
+                actual, reference, atol=tolerance, rtol=tolerance,
+                err_msg=f"Export-only Stage1 lowering changed source output {index}",
             )
         exported = torch.export.export(model, args, strict=True)
     finally:
-        for parent, name, original_norm in saved:
+        for parent, name, original_norm in saved_norm:
             setattr(parent, name, original_norm)
+        if saved_linears:
+            from stage1_linear_lowering import restore_source_linears
+            restore_source_linears(saved_linears)
+        for name, original_linear in saved_fuse:
+            setattr(model.source.fuse, name, original_linear)
+        if saved_down is not None:
+            model.source.down.conv = saved_down
         blocks._shifted_region_groups_3d_cached = original
 
     exported = exported.run_decompositions({
         torch.ops.aten.scaled_dot_product_attention.default:
             _sdpa_inference_math,
-        torch.ops.aten.rms_norm.default:
-            _rms_norm_inference_math,
+        torch.ops.aten.rms_norm.default: (
+            _rms_norm_segmented_128_math if rms_reduction == "segmented128"
+            else _rms_norm_inference_math
+        ),
     })
     unconverted = [
         str(node.target) for node in exported.graph.nodes
@@ -216,7 +259,8 @@ def check_results(actual, expected, prefix, atol, rtol):
 def run(args):
     report = {"scope": "original Stage1; reduced untrained two-frame profile",
               "checkpoint": False, "recurrent_sites": False,
-              "import": False, "compile": False, "vulkan_execute": False}
+              "import": False, "compile": False, "vulkan_execute": False,
+              "rms_reduction": args.rms_reduction}
     args.output.mkdir(parents=True, exist_ok=True)
     try:
         model, samples, expected = create_stage1()
@@ -224,7 +268,9 @@ def run(args):
         for i, value in enumerate(expected):
             np.save(args.output / f"source_{i}.npy", value)
 
-        exported, signatures = export_stage1(model, samples)
+        exported, signatures = export_stage1(
+            model, samples, rms_reduction=args.rms_reduction
+        )
         report["region_signatures"] = signatures
         with torch.inference_mode():
             cpu = tuple(t.detach().numpy() for t in exported.module()(*samples))
@@ -282,6 +328,10 @@ def main():
     parser.add_argument("--target", default="llvmpipe")
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--execute-vulkan", action="store_true")
+    parser.add_argument(
+        "--rms-reduction", choices=("native", "segmented128"),
+        default="native", help="Export-only source-equivalent RMSNorm lowering",
+    )
     args = parser.parse_args()
     if args.execute_vulkan and not args.compile:
         parser.error("--execute-vulkan requires --compile")

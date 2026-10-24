@@ -1,5 +1,26 @@
 # AMD-native inference architecture
 
+## Validated native Vulkan milestone (2026-10-24)
+
+The trained Stage1 (512 learned tensors) and Stage2 (226 learned tensors)
+now independently match the original source on the Radeon 8060S. A
+compiled, PyTorch-free Stage1→Stage2 runtime replay also passes
+reference comparisons with the **native, unsegmented** reductions.
+Ten isolated native reduction tests across widths 128/192/256/512/1280
+pass with zero mismatches and one-hot contributions counted once.
+
+The compiled two-stage replay measured **79.229 ms median wall-clock**
+including explicit baton readback, CPU NHWC→NCHW layout conversion and
+reupload. This is a correctness/execution baseline, not GPU kernel latency
+or production throughput. Frozen foundation inference, original video
+and temporal scheduling, native C++23 integration and GPU-resident
+interstage transfers remain unfinished.
+
+The reduction correction and hardware acceptance are recorded in
+[`iree-3.13-wave32-fix.md`](iree-3.13-wave32-fix.md);
+earlier failure investigations below remain historical diagnostics,
+not the current acceptance status.
+
 ## Objective
 
 Execute CorridorKey's original learned models and checkpoints natively on AMD GPUs under Vulkan, preserving full-resolution foreground/alpha output, HDR color and temporal semantics, and without requiring CUDA, ROCm/HIP, ONNX, or PyTorch in the deployed runtime. The import/compiler architecture must accept subsequent CorridorKey model releases without manual reimplementation of their networks.
@@ -105,7 +126,7 @@ Vulkan/SPIR-V is the **GPU** target, not a portable NPU driver. The shared MLIR 
 
 ## Validation and maintenance
 
-- Model compatibility CI ingests each upstream CorridorKey checkpoint/config and emits: imported graph inventory, unsupported ops, compiled graph coverage, precision and device requirements, output-diff report, and full end-to-end smoke results where hardware is available.
+- Model compatibility CI ingests each future CorridorKey checkpoint/config and emits: imported graph inventory, unsupported ops, compiled graph coverage, precision and device requirements, output-diff report, and full end-to-end smoke results where hardware is available.
 - Source model release updates pass through import → legalization → compilation → differential tests → benchmark. Supported operators and schedulers remain reusable.
 - Test existing graph fixtures as regression tests when changing compiler, IREE, MLIR, Vulkan features or AMD drivers.
 - Build native components on `windows-latest` and current Ubuntu LTS. GPU correctness and performance must be validated on real AMD hardware.
@@ -198,3 +219,327 @@ The export step compares the source `Stage1` output with the fully decomposed ex
 A stronger regression fixture additionally activates the source's initially zeroed mid-stage detour projections, /64-to-/16 upsample contribution, and learned late skip. These are fixture weights, not a production model modification; they prevent unused residual pathways from masking compiler defects. That enhanced test has passed source-to-export equivalence, Windows RDNA1 compilation, and software-Vulkan numerical execution on Linux (Actions run 40034698628). It is a stronger correctness proof, not a measurement of actual AMD hardware performance.
 
 Still required separately: actual checkpoint Stage 1 configuration and tensor loading, RVM and MoGe/C-RADIO feature integration, recurrent memory-state inputs/outputs, time-stride and streaming/Hann-window scheduling, high-resolution padded shapes, and practical AMD execution/performance. Validation on the reduced source model cannot replace any of those gates.
+
+## Local AMD importer environment (Windows and Linux)
+
+Use an existing Conda environment for checkpoint validation, or create an
+isolated one if desired. The installer resolves compatible packages without
+requiring Python 3.12 or exact local package versions. The reproducible CI
+profile uses separately pinned versions.
+
+```powershell
+python scripts/setup_amd_importer.py --profile checkpoint
+python scripts/download_weights.py --stage2_checkpoint_only
+python scripts/ci/prove_checkpoint_stage2.py weights/corridorkey_v2.safetensors --height 64 --width 64
+```
+
+For source-to-Vulkan export and trained checkpoint compilation, install the
+additional compiler dependencies in the same environment:
+
+```powershell
+python scripts/setup_amd_importer.py --profile vulkan
+python scripts/ci/prove_checkpoint_stage2.py weights/corridorkey_v2.safetensors --height 64 --width 64 --compile --target rdna1
+```
+
+On an AMD system with a configured Vulkan ICD, add `--execute-vulkan` to
+perform numerical device/reference comparisons. The checkpoint profile does
+not import or require IREE; neither profile installs a CUDA or ROCm build of
+PyTorch. The setup script supports `--dry-run` to inspect the commands.
+These are host-side model import/reference dependencies, not requirements for
+the eventual native inference runtime. If a dependency combination fails,
+record the versions and the failing operation before constraining local
+environments.
+
+The Stage2 exporter proves the dense shifted-window mask's real-query
+attention membership against the source's grouped-window representation.
+Because dense and grouped SDPA use different matrix/reduction shapes,
+a source-to-legalized FP32 comparison uses 1e-5 absolute/relative tolerance;
+the independent source-to-export and Vulkan checks remain separately enforced.
+
+## Trained Stage2 Vulkan differential diagnosis
+
+When a trained Stage2 graph imports and compiles but device output diverges,
+run the structural-boundary diagnostic with the same checkpoint and image
+shape:
+
+```powershell
+python scripts/ci/diagnose_stage2_vulkan.py --checkpoint weights/corridorkey_v2.safetensors --height 64 --width 64 --target rdna1 --output build/checkpoint-stage2-diagnostic
+```
+
+The diagnostic reuses the source Stage2 exporter and probes the checkpoint's
+actual patchification, every pre-/post-skip transformer block input, the late
+patch branch where present, and depatchification. It first checks that the
+instrumented graph and its re-export still reproduce the original CPU output.
+Each captured CPU and Vulkan tensor is written to the output directory, with
+per-boundary error counts, maximum and percentile differences, and the earliest
+divergent boundary in `report.json`. A different output signature can change
+compiler optimization; if the original failure disappears under instrumentation,
+the diagnostic report is not evidence that the original executable is fixed.
+
+The `--probe-only` option checks probe capture and CPU re-export without an
+IREE/Vulkan compile. The CI fixture uses that mode to exercise the probe
+selection logic without downloading production weights.
+
+### Isolating the first trained full-spatial block
+
+If `input_pre_0` agrees and `input_pre_1` diverges, use the focused
+checkpoint diagnostic:
+
+```powershell
+python scripts/ci/diagnose_stage2_vulkan.py --checkpoint weights/corridorkey_v2.safetensors --height 64 --width 64 --target rdna1 --first-block --output build/checkpoint-stage2-block0
+```
+
+This probes the original block 0's RMSNorm, linear QKV, normalized Q/K,
+gated full-spatial attention, output projection, learned spatial
+depthwise value/gate convolutions (when enabled), and SwiGLU MLP.
+The first block in the ten-block production architecture does not
+enable the separate QKV depthwise convolution. Probes are original
+model tensor boundaries exported from the same graph; no independent
+network or replacement attention implementation is used. Inspect
+`report.json` and the saved CPU/Vulkan intermediate tensors to
+identify the first divergent operation. CPU probe mapping is exercised
+on the small source-derived fixture in both CI environments.
+
+
+## Isolated production-width RMSNorm validation
+
+When the first transformer block's input agrees but `pre0_norm1`
+diverges, isolate that original normalization from the rest of Stage2.
+The following test loads the trained block 0 normalization parameters,
+captures the exact source input from the trained model, and compiles
+both native-rank and flattened-token views of the same source RMSNorm:
+
+```powershell
+python scripts/ci/prove_checkpoint_rmsnorm.py --checkpoint weights/corridorkey_v2.safetensors --height 64 --width 64 --target rdna1 --execute-vulkan --output build/checkpoint-rmsnorm
+```
+
+The source output is checked against the flattened-token source output
+at zero tolerance before either is exported; exported CPU inference
+is independently compared to the source. Both Vulkan executions must
+meet the existing `3e-3` absolute/relative gate. The command records
+per-variant differences and the actual input/CPU/Vulkan tensors, so a
+failure is evidence of a particular backend operation rather than a
+reason to loosen the threshold. The source-derived 1280-wide fixture
+is compiled for RDNA1 on Windows and executed on software Vulkan on
+Linux CI without downloading trained weights.
+
+## Production-width RMSNorm backend reduction investigation
+
+The actual trained model's initial `pre_blocks.0.norm1` produces the first
+incorrect Vulkan values at 1280 channels. In a source-preserving standalone
+test, the GPU input, elementwise square, and trained affine weight match CPU
+exactly. The first mismatch is the mean-square reduction across 1280 channels.
+Both native-rank, flattened-rank, and two-step 256-channel source-equivalent
+reductions produce the same wrong output on the tested AMD device.
+
+The standalone proof supports an opt-in compiler-lowering comparison, retaining
+all source weights and the same final numerical acceptance criteria:
+
+```powershell
+python scripts/ci/prove_checkpoint_rmsnorm.py --checkpoint weights/corridorkey_v2.safetensors --height 64 --width 64 --target rdna1 --execute-vulkan --explore-reductions --output build/checkpoint-rmsnorm
+```
+
+This additionally tests a constant-vector matrix contraction of the squared
+channels, a power-of-two zero-padded reduction divided by the original channel
+count, and the original source normalization compiled at `O0`. Each case
+requires source/export CPU equivalence before Vulkan compilation and retains
+its own .mlir, .vmfb, GPU array, and numerical report. These are comparative
+compiler diagnostics, not production fallback selections. The report stores
+the 16 mean-square CPU and Vulkan scalar values and their ratio; a consistent
+ratio can expose a faulty padded divisor. No alternate method becomes the
+Stage2 export lowering until the trained GPU gate is passed and the performance
+trade-off is measured.
+
+On the current IREE llvmpipe compiler, the optional seven-output term tracing
+graph fails codegen when lowering a vector constant, independently of the
+standalone RMSNorm operation. CI exercises the uninstrumented native, flattened,
+and chunked source-equivalent normalization proofs with `--no-trace-terms` on
+Linux, while keeping full term tracing enabled by default for hardware-local
+reproduction where it compiles. Neither behavior relaxes the numerical gates.
+
+## 1280-channel reduction width sweep
+
+With the official checkpoint's first-block input captured as
+`build/checkpoint-rmsnorm/input.npy`, independently compile exact
+sum-of-squares and mean-of-squares for multiple channel widths:
+
+```powershell
+python scripts/ci/prove_vulkan_reductions.py --source-input build/checkpoint-rmsnorm/input.npy --target rdna1 --execute-vulkan --output build/reduction-sweep
+```
+
+A standalone source-derived suite (using deterministic inputs) runs two
+representative widths in CI, compiling for RDNA1 on Windows and executing
+on Linux software Vulkan. The local suite reports each of the 16 GPU/CPU
+reductions, error counts, and min/median/max scaling, and names the
+Vulkan devices visible to IREE. The default IREE device is used for
+execution; on systems with multiple Vulkan devices, verify device selection.
+
+This test separates a mean-only division bug from a broken sum-of-squares
+reduction, establishes the first failing channel width, and keeps the
+compiler target explicit. Choose the target architecture that matches
+the actual GPU (e.g. rdna1 for RX 5000, rdna2 for RX 6000, rdna3 for
+RX 7000); do not mistake successful RDNA1 compilation for a correctness
+test on a newer architecture. For generated SPIR-V and lowered MLIR use
+`--dump-executables`; all compile and device artifacts are written under
+`build/reduction-sweep`. This is an isolated compiler regression test,
+not a hardcoded source-model normalization correction.
+
+## AMD Vulkan reduction correctness — reproduction details
+
+A local Radeon 8060S running AMD's proprietary Vulkan LLPC driver
+26.8.1 reproduced an exactly **2×** result for both `sum(square(x))`
+and `mean(square(x))` on all 16 spatial tokens at widths 256, 512, 768,
+1024, 1280, and 2048. Widths 32, 64, and 128 numerically agree.
+Using the `rdna3` IREE target instead of `rdna1` did not correct
+256- or 1280-channel reductions, and the trained Stage2 output still
+failed its source comparison. This disproves a simple architecture-family
+target mismatch as the solution.
+
+The standalone reduction sweep now also supports
+`split128_sum_square` and `split128_mean_square`. Those expressions
+reduce each 128-channel slice independently and sum its partial results,
+preserving the original normalization domain and divisor. In contrast
+to dividing a known failing result by two, these tests evaluate a
+mathematically equivalent reduction graph and expose whether IREE
+merges the source's independent small reductions into the failing
+wide-reduction lowering. No such alternative has been adopted for
+production inference. Compiler and runtime package versions are
+recorded alongside the device and per-width numerical errors.
+
+Suggested focused run, using the actual checkpoint's cached RMSNorm input:
+
+```powershell
+python scripts/ci/prove_vulkan_reductions.py --source-input build/checkpoint-rmsnorm/input.npy --widths 128,192,224,255,256,257,1280 --operations sum_square,mean_square,split128_sum_square,split128_mean_square --target rdna3 --execute-vulkan --output build/reduction-sweep-segmented
+```
+
+For follow-up compiler/driver investigation, collect the generated SPIR-V
+with `--dump-executables` and compare the reduction subgroup sizes,
+workgroup sizes, and scheduling across the 128/256 boundary.
+
+## Opt-in segmented Stage2 RMSNorm import
+
+Local testing on the Radeon 8060S, AMD proprietary Vulkan 26.8.1
+with IREE compiler/runtime 3.13.0, found that full-width source
+sum- and mean-square reductions above 128 channels are miscomputed.
+A two-stage sum of contiguous <=128-element slices agrees with CPU
+for all tested widths, including the production width of 1280.
+This is algebraically the **same full-domain mean**, not an ad hoc
+multiplicative correction. The learned affine parameter, epsilon, and
+normalized shape remain unchanged.
+
+The export-only `segmented128` RMSNorm decomposition is deliberately
+opt-in until the full checkpoint-backed Vulkan result and runtime cost
+are validated. The default `native` remains an independent failure
+control. This same lowering supports multidimensional normalized shapes
+by flattening only their trailing normalized axes during the operation.
+
+Test with the already-downloaded real checkpoint:
+
+```powershell
+python scripts/ci/prove_checkpoint_rmsnorm.py --checkpoint weights/corridorkey_v2.safetensors --height 64 --width 64 --target rdna3 --execute-vulkan --no-trace-terms --output build/checkpoint-rmsnorm-segmented
+python scripts/ci/prove_checkpoint_stage2.py weights/corridorkey_v2.safetensors --height 64 --width 64 --compile --execute-vulkan --target rdna3 --rms-reduction segmented128 --output build/checkpoint-stage2-segmented
+```
+
+Both source/export CPU and source/device results remain independently
+checked. If the real model passes, benchmark the native and segmented
+kernels and use a compiler reduction correction rather than
+permanently making this model-specific. Keep final acceptance attached
+to an actual trained checkpoint executing on physical AMD hardware.
+
+## Trained Stage1 to Stage2 executable pipeline
+
+The original trained Stage2 proof has passed on Radeon 8060S using the
+`segmented128` RMSNorm lowering. The next independently compiled model
+partition is the **original checkpoint's Stage1**. It is now constructed
+from the source `CorridorKeyV3` Stage1 parameters, using checkpoint
+metadata and the width of its trained fusion weights to resolve the
+C-RADIO feature interface without constructing external foundation
+models. It strictly loads every Stage1 tensor and refuses missing or
+unexpected state. Synthetic feature boundary tensors have the correct
+source shapes and ordering; they are deliberately **not** described as
+MoGe/C-RADIO/RVM output.
+
+For trained Stage1, the exporter reuses source temporal attention, hint
+conditioning, both trained output heads, and the exact graph capture,
+with the source-equivalent segmented RMSNorm decomposition. The original
+source output, exported CPU graph, and compiled Vulkan output are
+compared independently.
+
+A single command chains real-checkpoint Stage1 loading/export/Vulkan
+proof, real-checkpoint Stage2 compilation with the **actual source
+Stage1 baton as input**, then executes their compiled VMFBs in a separate
+host that imports **NumPy and IREE runtime but not PyTorch**:
+
+```powershell
+python scripts/ci/prove_trained_pipeline.py weights/corridorkey_v2.safetensors --height 64 --width 64 --target rdna3 --output build/trained-two-stage
+```
+
+Individual artifacts are stored under `stage1/`, `stage2/`, and
+`execution/`. The IREE-only host reads Stage1's channel-last baton
+back to host, transposes it to Stage2's channel-first input ABI, and
+reuploads it. This **explicit staging boundary** is neither zero-copy
+nor a production scheduling implementation: reports separately disclose
+transfer bytes and end-to-end wall-clock latency including copies and
+synchronization. It gives the real trained subgraph an executable
+non-PyTorch deployment boundary that can later be moved to the required
+native C++23 host with device-resident buffer sharing.
+
+Passing this proof will establish two trained connected neural stages,
+but **not** the complete video matting pipeline: external foundation
+models, precomputed feature normalization from foundation statistics,
+overlapping temporal Hann windows, recurrent carry, native HDR/color
+handling, and video scheduling still require their own original-model
+imports and integration. CI can validate the strict trained Stage1
+loader against a small generated checkpoint and exercise source-derived
+fixtures; hosted runners do not contain the official model weights or
+a physical Radeon 8060S. Do not conflate those CI checks with physical
+GPU execution of trained Stage1.
+
+## Open investigation: AMD Vulkan wide-accumulation correctness
+
+The Stage2 RMSNorm 1280-channel reduction failure and the trained Stage1
+downsample's 8192-term GEMM accumulation failure are now tracked together in
+[AMD Vulkan wide-accumulation correctness investigation](amd-vulkan-wide-accumulation-investigation.md).
+
+Both have reproduced approximately 2× accumulation on the recorded physical
+AMD Vulkan configuration, while mathematically equivalent <=128-element
+segmented reductions agree with the original CPU calculation. The Stage1
+runtime-input GEMM reproduces the failure with the original checkpoint values,
+excluding a captured-constant-only explanation. The first Stage1 mismatch is
+the original /16→/64 downsample; the preceding stem and encoder probes pass.
+
+**Root cause remains open.** IREE lowering, the Vulkan driver compiler, and
+execution/dispatch behavior still require controlled cross-driver testing and
+generated-code inspection. A segmented computation is a numerical correctness
+control, not a compiler fix. The generalized segmented Stage1 export and
+connected two-stage Vulkan proof still require physical-hardware validation.
+Retain the failing native variants as reproducible baselines, along with driver,
+compiler, target, IR/SPIR-V, and performance metadata.
+
+## Unified trained Vulkan pipeline diagnostics
+
+`scripts/ci/prove_trained_pipeline.py` always writes
+`<output>/corridorkey-vulkan-diagnostics.json` in its finalization path,
+including when checkpoint-backed Stage1 or Stage2 GPU comparison fails.
+This **single shareable JSON** includes the complete available pipeline,
+Stage1, Stage1 differential, Stage2, and connected execution reports under
+distinct named keys, plus an ordered probe summary and the first divergent
+boundary. Individual `report.json` files remain available under their
+respective subdirectories for automated tools and local troubleshooting.
+Absent stages are represented as absent reports, not as successful executions.
+Old stage reports are cleared when a fresh pipeline run begins to prevent
+reusing stale results from a previous attempt in the same output directory.
+
+To consolidate an existing run without rerunning any checkpoint compilation
+or Vulkan execution:
+
+```powershell
+python scripts/ci/collect_pipeline_diagnostics.py --output build/trained-two-stage-fuse
+```
+
+Share only the resulting
+`build/trained-two-stage-fuse/corridorkey-vulkan-diagnostics.json`.
+For backend analysis requiring full tensor values or compiled SPIR-V, retain
+the per-stage `.npy`, MLIR and VMFB artifacts locally; the summary JSON
+intentionally does not duplicate these potentially large binaries.
+
