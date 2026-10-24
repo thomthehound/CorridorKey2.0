@@ -155,8 +155,10 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
             python scripts/ci/prove_vulkan_reductions.py --widths 128,256,1280 --operations sum_square,mean_square,split128_sum_square,split128_mean_square --target llvmpipe --execute-vulkan --output build/reduction-sweep
+            python scripts/ci/prove_vulkan_reductions.py --widths 128,192,256 --operations sum_square --target llvmpipe --execute-vulkan --one-hot --dump-executables --record-subgroups --output build/subgroup-smoke
           else
-            python scripts/ci/prove_vulkan_reductions.py --widths 128,256,1280 --operations sum_square,mean_square,split128_sum_square,split128_mean_square --target rdna1 --output build/reduction-sweep
+            python scripts/ci/prove_vulkan_reductions.py --widths 128,256,1280 --operations sum_square,mean_square,split128_sum_square --target rdna1 --output build/reduction-sweep
+            python -m py_compile scripts/ci/prove_vulkan_reductions.py
           fi
 
       - name: Verify Stage1 probes through Torch-MLIR import
