@@ -234,3 +234,27 @@ attention membership against the source's grouped-window representation.
 Because dense and grouped SDPA use different matrix/reduction shapes,
 a source-to-legalized FP32 comparison uses 1e-5 absolute/relative tolerance;
 the independent source-to-export and Vulkan checks remain separately enforced.
+
+## Trained Stage2 Vulkan differential diagnosis
+
+When a trained Stage2 graph imports and compiles but device output diverges,
+run the structural-boundary diagnostic with the same checkpoint and image
+shape:
+
+```powershell
+python scripts/ci/diagnose_stage2_vulkan.py --checkpoint weights/corridorkey_v2.safetensors --height 64 --width 64 --target rdna1 --output build/checkpoint-stage2-diagnostic
+```
+
+The diagnostic reuses the source Stage2 exporter and probes the checkpoint's
+actual patchification, every pre-/post-skip transformer block input, the late
+patch branch where present, and depatchification. It first checks that the
+instrumented graph and its re-export still reproduce the original CPU output.
+Each captured CPU and Vulkan tensor is written to the output directory, with
+per-boundary error counts, maximum and percentile differences, and the earliest
+divergent boundary in `report.json`. A different output signature can change
+compiler optimization; if the original failure disappears under instrumentation,
+the diagnostic report is not evidence that the original executable is fixed.
+
+The `--probe-only` option checks probe capture and CPU re-export without an
+IREE/Vulkan compile. The CI fixture uses that mode to exercise the probe
+selection logic without downloading production weights.

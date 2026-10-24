@@ -121,6 +121,11 @@ jobs:
             python scripts/ci/prove_stage2_vulkan.py --output build/stage2-proof --target rdna1
           fi
 
+      - name: Verify Stage2 diagnostic probe selection
+        shell: bash
+        run: |
+          python scripts/ci/diagnose_stage2_vulkan.py --output build/stage2-probe-check --probe-only
+
       - name: Diagnose Stage2 numerical mismatch
         if: failure() && runner.os == 'Linux'
         shell: bash

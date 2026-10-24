@@ -276,11 +276,24 @@ def run(args) -> int:
                     .transpose(0, 1, 4, 2, 3).copy()
                     for t in result
                 )
+                # Preserve divergent outputs and error statistics even when
+                # the Vulkan numerical assertion fails.
+                for index, value in enumerate(actual):
+                    np.save(args.output / f"vulkan_{index}.npy", value)
+                report["vulkan_error_stats"] = [
+                    {
+                        "output": index,
+                        "max_absolute_error": float(np.max(np.abs(a - b))),
+                        "mean_absolute_error": float(np.mean(np.abs(a - b))),
+                        "mismatched": int(np.sum(~np.isclose(
+                            a, b, atol=3e-3, rtol=3e-3,
+                        ))),
+                    }
+                    for index, (a, b) in enumerate(zip(actual, source))
+                ]
                 report["vulkan_errors"] = _assert_reference(
                     actual, source, "Vulkan Stage2",
                 )
-                for index, value in enumerate(actual):
-                    np.save(args.output / f"vulkan_{index}.npy", value)
                 report["vulkan_execute"] = True
                 print("[checkpoint Stage2] trained Vulkan graph matches source",
                       flush=True)
