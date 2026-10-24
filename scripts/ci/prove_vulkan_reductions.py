@@ -160,22 +160,54 @@ def rt_asdevice(config, tensor):
 
 
 def collect_executable_subgroup_metadata(directory: Path):
-    """Summarize emitted subgroup metadata without claiming a device wave size."""
-    selected = []
-    sizes = set()
+    """Extract complete dispatch configurations and SPIR-V entry-point ABIs.
+
+    These are compiler artifacts, not proof of the subgroup size that the
+    Vulkan driver actually used. Do not infer a requested subgroup from the
+    presence of `subgroup_size_choices` in the target capability set.
+    """
+    dispatches = []
+    abi = []
+    choices = set()
+    selected_sizes = set()
     for path in sorted(directory.rglob("*.mlir")):
         content = path.read_text(encoding="utf-8", errors="replace")
-        for match in re.finditer(r"(?<!\w)subgroup_size\s*=\s*(\d+)", content):
-            sizes.add(int(match.group(1)))
-        for line_no, line in enumerate(content.splitlines(), start=1):
-            if ("subgroup_size" in line
-                    or "spirv.entry_point_abi" in line
-                    or "iree_codegen.dispatch_config" in line):
-                if len(selected) < 48:
-                    selected.append({
-                        "file": str(path.relative_to(directory)),
-                        "line": line_no, "text": line.strip()[:450],
-                    })
+        lines = content.splitlines()
+        name = str(path.relative_to(directory))
+        for match in re.finditer(
+            r"subgroup_size_choices\s*=\s*\[\s*(\d+)\s*,\s*(\d+)\s*\]",
+            content,
+        ):
+            choices.add((int(match.group(1)), int(match.group(2))))
+        for match in re.finditer(
+            r"(?<!\w)subgroup_size\s*=\s*(\d+)", content
+        ):
+            selected_sizes.add(int(match.group(1)))
+        for index, line in enumerate(lines):
+            if "iree_codegen.dispatch_config" in line:
+                # A subgroup_size value is commonly nested in this block,
+                # several lines after the opening declaration.
+                block = [line.strip()]
+                for following in lines[index + 1:index + 22]:
+                    block.append(following.strip())
+                    if following.strip() == "}":
+                        break
+                dispatches.append({
+                    "file": name,
+                    "line": index + 1,
+                    "config": "\n".join(block),
+                })
+            if ("spirv.entry_point_abi" in line
+                    or "spirv.entry_point" in line
+                    and "abi" in line):
+                context = " ".join(
+                    value.strip() for value in lines[index:index + 4]
+                )
+                abi.append({
+                    "file": name,
+                    "line": index + 1,
+                    "text": context[:1400],
+                })
     binaries = []
     for path in sorted(directory.rglob("*.spv")):
         try:
@@ -194,15 +226,71 @@ def collect_executable_subgroup_metadata(directory: Path):
         except OSError:
             continue
     return {
-        "selected_subgroup_sizes_in_ir": sorted(sizes),
-        "warning": "IR subgroup_size values are codegen requests; "
-                   "device subgroupSize is separate. Presence of a size "
-                   "does not prove that the final Vulkan pipeline requested it.",
-        "evidence": selected, "spirv_binaries": binaries,
+        "target_subgroup_size_choices": [list(choice) for choice in sorted(choices)],
+        "selected_subgroup_sizes_in_ir": sorted(selected_sizes),
+        "dispatch_configurations": dispatches,
+        "spirv_entry_point_abis": abi,
+        "spirv_binaries": binaries,
+        "interpretation": "Subgroup size choices are hardware capabilities, "
+            "not a pipeline requirement. An explicit subgroup_size in the "
+            "dispatch config must propagate to the SPIR-V entry-point ABI "
+            "and serialized Vulkan PipelineDef to request wave32 at runtime. "
+            "Absent metadata here is not proof of the final pipeline state.",
     }
 
 
+def inspect_existing_dumps(output: Path) -> int:
+    """Refresh evidence using previously dumped executables; no Vulkan calls."""
+    report_path = output / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    for case in report.get("cases", []):
+        directory = output / f"{case['name']}_executables"
+        if directory.is_dir():
+            case["codegen_subgroup_metadata"] = (
+                collect_executable_subgroup_metadata(directory)
+            )
+        else:
+            case["codegen_subgroup_metadata"] = {
+                "error": f"Missing executable dump directory: {directory}"
+            }
+    out = output / "subgroup-inspection.json"
+    out.write_text(json.dumps({
+        "device_names": report.get("device_names", []),
+        "vulkan_properties": report.get("vulkan_properties", {}),
+        "cases": [
+            {
+                "name": c["name"],
+                "width": c["width"],
+                "numerical_match": c.get("numerical_match"),
+                "one_hot_summary": {
+                    key: c.get("one_hot", {}).get(key)
+                    for key in ("min", "max", "roughly_once", "roughly_twice")
+                },
+                "codegen_subgroup_metadata": c.get("codegen_subgroup_metadata"),
+            }
+            for c in report["cases"]
+        ],
+    }, indent=2) + "\n", encoding="utf-8")
+    print(f"[reduction sweep] Compiler subgroup inspection: {out}", flush=True)
+    for case in report["cases"]:
+        metadata = case["codegen_subgroup_metadata"]
+        print(
+            f"[reduction sweep] {case['name']}: "
+            f"target choices={metadata.get('target_subgroup_size_choices')}; "
+            f"explicit IR subgroup sizes="
+            f"{metadata.get('selected_subgroup_sizes_in_ir')}; "
+            f"entry-point ABIs={len(metadata.get('spirv_entry_point_abis', []))}",
+            flush=True,
+        )
+    return int(any(
+        "error" in case.get("codegen_subgroup_metadata", {})
+        for case in report["cases"]
+    ))
+
+
 def run(args):
+    if args.inspect_only:
+        return inspect_existing_dumps(args.output)
     import iree.turbine.aot as aot
 
     args.output.mkdir(parents=True, exist_ok=True)
@@ -390,6 +478,9 @@ def main():
                              "with identical runtime reduction shapes")
     parser.add_argument("--record-subgroups", action="store_true",
                         help="Capture vulkaninfo device/subgroup properties")
+    parser.add_argument("--inspect-only", action="store_true",
+                        help="Inspect previously dumped executables without "
+                             "recompiling or executing any GPU kernels")
     parser.add_argument(
         "--output", type=Path, default=Path("build/reduction-sweep")
     )
