@@ -45,6 +45,15 @@ when available. Your 8060S reports this feature. Thus the normal
 runtime device-creation path already has the required capability;
 no separate Vulkan loader shim should be needed for this experiment.
 
+The IREE upstream [issue #24688](https://github.com/iree-org/iree/issues/24688)
+already warns that a target subgroup-size configuration differing from the
+device's actual subgroup size can cause incorrect results. That issue concerns
+default Vulkan target selection; the **specific missing subgroup-size
+propagation at the two `SubgroupReduce` call sites** is independently
+identified here and should be reported to IREE with the patch and physical
+reproducer after verification. The omissions are still present in the
+current upstream `main` source as inspected on 2026-10-24.
+
 ## Minimal upstream-compatible patch
 
 [`patches/iree/3.13.0-require-subgroup-size.patch`](../patches/iree/3.13.0-require-subgroup-size.patch)
