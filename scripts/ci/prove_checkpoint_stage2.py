@@ -159,6 +159,17 @@ def self_test():
             torch.testing.assert_close(loaded.state_dict()[name], tensor,
                                        atol=0.0, rtol=0.0)
 
+        # This path must work with no IREE compiler installed.
+        cpu_args = argparse.Namespace(
+            checkpoint=checkpoint, output=Path(tmp) / "cpu-only",
+            height=32, width=32, compile=False,
+            execute_vulkan=False, target="rdna1",
+        )
+        if run(cpu_args) != 0:
+            raise AssertionError("CPU-only checkpoint inference failed")
+        if "iree" in sys.modules:
+            raise AssertionError("CPU-only checkpoint inference imported IREE")
+
         missing = dict(state)
         missing.pop(next(iter(missing)))
         save_file(missing, str(checkpoint), metadata=metadata)
@@ -172,8 +183,6 @@ def self_test():
 
 
 def run(args) -> int:
-    from prove_stage2_vulkan import ChannelLastStage2Result, export_stage2
-
     args.output.mkdir(parents=True, exist_ok=True)
     report = {
         "checkpoint": str(args.checkpoint),
@@ -200,7 +209,6 @@ def run(args) -> int:
         height, width = args.height, args.width
         rgb = torch.randn(1, 1, 3, height, width)
         baton = torch.randn(1, 1, config["d_16"], height // 16, width // 16)
-        model = ChannelLastStage2Result(stage2).eval()
         with torch.inference_mode():
             source = _as_arrays(stage2(rgb, baton))
         for index, value in enumerate(source):
@@ -213,7 +221,18 @@ def run(args) -> int:
               f"source output shapes={report['source_shapes']}", flush=True)
 
         if args.compile:
-            import iree.turbine.aot as aot
+            try:
+                import iree.turbine.aot as aot
+            except ModuleNotFoundError as exc:
+                if exc.name == "iree" or exc.name.startswith("iree."):
+                    raise RuntimeError(
+                        "Vulkan compilation requires iree-turbine. "
+                        "Run: python scripts/setup_amd_importer.py --profile vulkan"
+                    ) from exc
+                raise
+            from prove_stage2_vulkan import ChannelLastStage2Result, export_stage2
+
+            model = ChannelLastStage2Result(stage2).eval()
 
             exported, specialized = export_stage2(model, rgb, baton)
             with torch.inference_mode():

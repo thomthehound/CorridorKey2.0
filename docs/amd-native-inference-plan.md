@@ -198,3 +198,32 @@ The export step compares the source `Stage1` output with the fully decomposed ex
 A stronger regression fixture additionally activates the source's initially zeroed mid-stage detour projections, /64-to-/16 upsample contribution, and learned late skip. These are fixture weights, not a production model modification; they prevent unused residual pathways from masking compiler defects. That enhanced test has passed source-to-export equivalence, Windows RDNA1 compilation, and software-Vulkan numerical execution on Linux (Actions run 40034698628). It is a stronger correctness proof, not a measurement of actual AMD hardware performance.
 
 Still required separately: actual checkpoint Stage 1 configuration and tensor loading, RVM and MoGe/C-RADIO feature integration, recurrent memory-state inputs/outputs, time-stride and streaming/Hann-window scheduling, high-resolution padded shapes, and practical AMD execution/performance. Validation on the reduced source model cannot replace any of those gates.
+
+## Local AMD importer environment (Windows and Linux)
+
+Keep the conversion/reference environment separate from the original CUDA
+application environment. Python 3.12 matches the Vulkan proof CI and its
+pinned NumPy 1.x dependencies:
+
+```powershell
+conda create -n corridorkey-amd python=3.12 -y
+conda activate corridorkey-amd
+python scripts/setup_amd_importer.py --profile checkpoint
+python scripts/download_weights.py --stage2_checkpoint_only
+python scripts/ci/prove_checkpoint_stage2.py weights/corridorkey_v2.safetensors --height 64 --width 64
+```
+
+For source-to-Vulkan export and trained checkpoint compilation, install the
+additional compiler dependencies in the same environment:
+
+```powershell
+python scripts/setup_amd_importer.py --profile vulkan
+python scripts/ci/prove_checkpoint_stage2.py weights/corridorkey_v2.safetensors --height 64 --width 64 --compile --target rdna1
+```
+
+On an AMD system with a configured Vulkan ICD, add `--execute-vulkan` to
+perform numerical device/reference comparisons. The checkpoint profile does
+not import or require IREE; neither profile installs a CUDA or ROCm build of
+PyTorch. The setup script supports `--dry-run` to inspect the commands.
+These are host-side model import/reference dependencies, not requirements for
+the eventual native inference runtime.
