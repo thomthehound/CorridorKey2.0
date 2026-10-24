@@ -1,0 +1,109 @@
+diff --git a/compiler/src/iree/compiler/Codegen/SPIRV/KernelConfig.cpp b/compiler/src/iree/compiler/Codegen/SPIRV/KernelConfig.cpp
+--- a/compiler/src/iree/compiler/Codegen/SPIRV/KernelConfig.cpp
++++ b/compiler/src/iree/compiler/Codegen/SPIRV/KernelConfig.cpp
+@@ -1366,7 +1366,13 @@
+     return failure();
+   }
+ 
+-  int subgroupSize = target.getPreferredSubgroupSize();
++  int subgroupSize = target.getPreferredSubgroupSize();
++  // Only require a subgroup size when the target supports multiple sizes.
++  // Fixed-size devices may lack Vulkan subgroup size control.
++  std::optional<int64_t> requestedSubgroupSize;
++  if (target.getMinSubgroupSize() != target.getMaxSubgroupSize()) {
++    requestedSubgroupSize = subgroupSize;
++  }
+ 
+   // Tile all the parallel dimension to 1.
+   SmallVector<unsigned> partitionedLoops =
+@@ -1391,7 +1397,7 @@
+     if (failed(setOpConfigAndEntryPointFnTranslation(
+             op->getParentOfType<mlir::FunctionOpInterface>(), op, config,
+             getSPIRVTranslationInfo(ctx, SPIRVPipeline::SubgroupReduce,
+-                                    workgroupSize)))) {
++                                    workgroupSize, requestedSubgroupSize)))) {
+       return failure();
+     }
+ 
+@@ -1512,7 +1518,7 @@
+   if (failed(setOpConfigAndEntryPointFnTranslation(
+           op->getParentOfType<mlir::FunctionOpInterface>(), op, config,
+           getSPIRVTranslationInfo(ctx, SPIRVPipeline::SubgroupReduce,
+-                                  workgroupSize)))) {
++                                  workgroupSize, requestedSubgroupSize)))) {
+     return failure();
+   }
+ 
+diff --git a/compiler/src/iree/compiler/Codegen/SPIRV/test/config_default_reduction.mlir b/compiler/src/iree/compiler/Codegen/SPIRV/test/config_default_reduction.mlir
+--- a/compiler/src/iree/compiler/Codegen/SPIRV/test/config_default_reduction.mlir
++++ b/compiler/src/iree/compiler/Codegen/SPIRV/test/config_default_reduction.mlir
+@@ -339,3 +339,69 @@
+ //      CHECK:   linalg.generic
+ // CHECK-SAME:       iterator_types = ["parallel", "parallel", "parallel"]
+ // CHECK-SAME:       lowering_config = #[[FUSED]]
++
++// -----
++
++// Variable-width subgroup target must record chosen 32-bit subgroup.
++// Existing fixed-width cases intentionally retain implicit subgroup size.
++#executable_target_vulkan_spirv_fb = #hal.executable.target<"vulkan-spirv", "vulkan-spirv-fb", {
++  iree_codegen.target_info = #iree_gpu.target<arch = "", features = "spirv:v1.6,cap:Shader", wgp = <
++    compute = fp32|int32, storage = b32, subgroup = shuffle,
++    subgroup_size_choices = [32, 64], max_workgroup_sizes = [512, 512, 512],
++    max_thread_count_per_workgroup = 512, max_workgroup_memory_bytes = 65536,
++    max_workgroup_counts = [65535, 65535, 65535]>>
++}>
++#map = affine_map<(d0, d1) -> (d0, d1)>
++#map1 = affine_map<(d0, d1) -> (d0)>
++func.func @subgroup_reduce_variable_width(%2: tensor<2x512xf32>) -> tensor<2xf32> attributes {hal.executable.target = #executable_target_vulkan_spirv_fb} {
++  %cst = arith.constant 0.000000e+00 : f32
++  %3 = tensor.empty() : tensor<2xf32>
++  %4 = linalg.fill ins(%cst : f32) outs(%3 : tensor<2xf32>) -> tensor<2xf32>
++  %5 = linalg.generic {indexing_maps = [#map, #map1], iterator_types = ["parallel", "reduction"]} ins(%2 : tensor<2x512xf32>) outs(%4 : tensor<2xf32>) {
++  ^bb0(%in: f32, %out: f32):
++    %6 = arith.addf %out, %in : f32
++    linalg.yield %6 : f32
++  } -> tensor<2xf32>
++  return %5 : tensor<2xf32>
++}
++
++//  CHECK-DAG: #[[CONFIG:.+]] = #iree_codegen.lowering_config<tile_sizes = {{\[}}[1], [0, 512]{{\]}}>
++//  CHECK-DAG: #[[TRANSLATION:.+]] = #iree_codegen.translation_info<pipeline = #iree_gpu.spirv_pipeline<SubgroupReduce> workgroup_size = [128, 1, 1] subgroup_size = 32>
++//      CHECK: func.func @subgroup_reduce_variable_width(
++// CHECK-SAME:     translation_info = #[[TRANSLATION]]
++//      CHECK:   linalg.generic
++// CHECK-SAME:       lowering_config = #[[CONFIG]]
++
++// -----
++
++// Dynamic reductions need the same explicit subgroup requirement.
++#config = #iree_codegen.lowering_config<tile_sizes = [[1], [0, 32]]>
++#executable_target_vulkan_spirv_fb = #hal.executable.target<"vulkan-spirv", "vulkan-spirv-fb", {
++  iree_codegen.target_info = #iree_gpu.target<arch = "", features = "spirv:v1.6,cap:Shader", wgp = <
++    compute = fp32|int32, storage = b32, subgroup = shuffle,
++    subgroup_size_choices = [32, 64], max_workgroup_sizes = [1024, 1024, 1024],
++    max_thread_count_per_workgroup = 1024, max_workgroup_memory_bytes = 16384,
++    max_workgroup_counts = [65535, 65535, 65535]>>
++}>
++#map = affine_map<(d0, d1) -> (d0, d1)>
++#map1 = affine_map<(d0, d1) -> (d0)>
++func.func @subgroup_reduce_variable_width_dynamic(%10: tensor<8x?xf32>) -> tensor<8xf32> attributes {hal.executable.target = #executable_target_vulkan_spirv_fb} {
++  %cst = arith.constant 0.000000e+00 : f32
++  %cst_0 = arith.constant 2.000000e+00 : f32
++  %11 = tensor.empty() : tensor<8xf32>
++  %12 = linalg.fill {lowering_config = #config} ins(%cst : f32) outs(%11 : tensor<8xf32>) -> tensor<8xf32>
++  %13 = linalg.generic {indexing_maps = [#map, #map1], iterator_types = ["parallel", "reduction"]} ins(%10 : tensor<8x?xf32>) outs(%12 : tensor<8xf32>) attrs =  {lowering_config = #config} {
++  ^bb0(%in: f32, %out: f32):
++    %14 = math.powf %in, %cst_0 : f32
++    %15 = arith.addf %14, %out : f32
++    linalg.yield %15 : f32
++  } -> tensor<8xf32>
++  return %13 : tensor<8xf32>
++}
++
++//  CHECK-DAG: #[[CONFIG:.+]] = #iree_codegen.lowering_config<tile_sizes = {{\[}}[1], [0, 32]{{\]}}>
++//  CHECK-DAG: #[[TRANSLATION:.+]] = #iree_codegen.translation_info<pipeline = #iree_gpu.spirv_pipeline<SubgroupReduce> workgroup_size = [32, 1, 1] subgroup_size = 32>
++//      CHECK: func.func @subgroup_reduce_variable_width_dynamic(
++// CHECK-SAME:     translation_info = #[[TRANSLATION]]
++//      CHECK:   linalg.generic
++// CHECK-SAME:       lowering_config = #[[CONFIG]]
