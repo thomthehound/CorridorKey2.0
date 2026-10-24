@@ -76,6 +76,7 @@ def make_bundle(reports: dict) -> dict:
         "target": pipeline.get("gpu_target") or diagnostic.get("target"),
         "down_reduction": pipeline.get("down_reduction"),
         "fuse_reduction": pipeline.get("fuse_reduction"),
+        "linear_reduction": pipeline.get("linear_reduction"),
         "pipeline_error": pipeline.get("error"),
     }
     return {
