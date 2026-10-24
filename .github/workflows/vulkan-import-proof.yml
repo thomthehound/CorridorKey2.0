@@ -7,6 +7,7 @@ on:
     paths:
       - ".github/workflows/vulkan-import-proof.yml"
       - "scripts/ci/**"
+      - "scripts/setup_amd_importer.py"
       - "corridorkey/**"
   pull_request:
     branches:
@@ -14,6 +15,7 @@ on:
     paths:
       - ".github/workflows/vulkan-import-proof.yml"
       - "scripts/ci/**"
+      - "scripts/setup_amd_importer.py"
       - "corridorkey/**"
   workflow_dispatch:
 
@@ -38,18 +40,37 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate standalone wave32 build script
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($script in @("scripts/ci/build_and_prove_iree_wave32.ps1", "scripts/ci/run_trained_with_patched_iree.ps1")) {
+            $tokens = $null
+            $parseErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $script, [ref]$tokens, [ref]$parseErrors
+            ) | Out-Null
+            if ($parseErrors.Count -gt 0) {
+              $parseErrors | Format-List | Out-String | Write-Host
+              throw "PowerShell parser failed for $script"
+            }
+          }
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
 
+      - name: Test Windows IREE python3 command resolution
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\ci\build_and_prove_iree_wave32.ps1 -CheckPythonOnly
       - name: Install CPU-only importer and IREE compiler
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "torch==2.9.1" --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install "iree-turbine==3.9.0" "numpy>=1.26,<2" "safetensors>=0.5,<1"
+          python scripts/setup_amd_importer.py --profile vulkan --ci
 
       - name: Validate versioned checkpoint metadata contract
         shell: bash
@@ -58,6 +79,19 @@ jobs:
       - name: Verify strict Stage2 checkpoint loading
         shell: bash
         run: python scripts/ci/prove_checkpoint_stage2.py --self-test
+
+      - name: Verify strict trained Stage1 checkpoint loading
+        shell: bash
+        run: python scripts/ci/prove_checkpoint_stage1.py --self-test
+
+      - name: Verify trained two-stage IREE runtime entry points
+        shell: bash
+        run: |
+          python scripts/ci/test_pipeline_diagnostics.py
+          python scripts/ci/test_subgroup_codegen_inspection.py
+          python scripts/ci/verify_iree_subgroup_codegen.py --self-test
+          python scripts/ci/prove_trained_pipeline.py --help
+          python scripts/ci/execute_compiled_stages.py --help
 
       - name: Install software Vulkan device (Linux)
         if: runner.os == 'Linux'
@@ -120,6 +154,55 @@ jobs:
             python scripts/ci/prove_stage2_vulkan.py --output build/stage2-proof --target rdna1
           fi
 
+      - name: Compile segmented complete Stage2 source fixture
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            python scripts/ci/prove_stage2_vulkan.py --output build/stage2-segmented --execute-vulkan --target llvmpipe --rms-reduction segmented128
+          else
+            python scripts/ci/prove_stage2_vulkan.py --output build/stage2-segmented --target rdna1 --rms-reduction segmented128
+          fi
+
+      - name: Compile production-width RMSNorm source module
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            python scripts/ci/prove_checkpoint_rmsnorm.py --output build/rmsnorm-proof --target llvmpipe --execute-vulkan --no-trace-terms
+          else
+            python scripts/ci/prove_checkpoint_rmsnorm.py --output build/rmsnorm-proof --target rdna1
+          fi
+
+      - name: Validate wide Vulkan reductions across widths
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            python scripts/ci/prove_vulkan_reductions.py --widths 128,256,1280 --operations sum_square,mean_square,split128_sum_square,split128_mean_square --target llvmpipe --execute-vulkan --output build/reduction-sweep
+            python scripts/ci/prove_vulkan_reductions.py --widths 128,192,256 --operations sum_square --target llvmpipe --execute-vulkan --one-hot --dump-executables --record-subgroups --output build/subgroup-smoke
+          else
+            python scripts/ci/prove_vulkan_reductions.py --widths 128,256,1280 --operations sum_square,mean_square,split128_sum_square --target rdna1 --output build/reduction-sweep
+            python -m py_compile scripts/ci/prove_vulkan_reductions.py
+          fi
+
+      - name: Verify Stage1 probes through Torch-MLIR import
+        shell: bash
+        run: |
+          python scripts/ci/diagnose_stage1_vulkan.py --import-only --output build/stage1-probe-check --target rdna1 --rms-reduction segmented128
+          python scripts/ci/test_stage1_fusion_lowering.py
+          python scripts/ci/diagnose_stage1_vulkan.py --import-only --down-reduction segmented128 --fuse-reduction segmented128 --linear-reduction segmented128 --output build/stage1-segdown-check --target rdna1 --rms-reduction segmented128
+
+      - name: Verify Stage1 downsample differential fixture
+        shell: bash
+        run: |
+          python scripts/ci/diagnose_stage1_down_vulkan.py --self-test-spatial --output build/stage1-down-probe
+          python scripts/ci/diagnose_stage1_down_vulkan.py --probe-only --output build/stage1-down-probe
+          python scripts/ci/diagnose_stage1_down_vulkan.py --import-only --modes native,crop4,gemm4,gemm4runtime,seg128,seg128general,spatial --output build/stage1-down-import
+
+      - name: Verify Stage2 diagnostic probe selection
+        shell: bash
+        run: |
+          python scripts/ci/diagnose_stage2_vulkan.py --output build/stage2-probe-check --probe-only
+          python scripts/ci/diagnose_stage2_vulkan.py --output build/stage2-block0-probe --probe-only --first-block
+
       - name: Diagnose Stage2 numerical mismatch
         if: failure() && runner.os == 'Linux'
         shell: bash
@@ -134,7 +217,14 @@ jobs:
           path: |
             build/vulkan-proof/
             build/stage2-proof/
+            build/stage2-segmented/
             build/stage2-diagnostic/
             build/stage1-proof/
+            build/stage1-probe-check/
+            build/stage1-down-probe/
+            build/stage1-down-import/
+            build/stage1-segdown-check/
+            build/rmsnorm-proof/
+            build/reduction-sweep/
           if-no-files-found: warn
           retention-days: 7

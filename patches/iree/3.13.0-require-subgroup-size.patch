@@ -1,0 +1,71 @@
+diff --git a/compiler/src/iree/compiler/Codegen/SPIRV/KernelConfig.cpp b/compiler/src/iree/compiler/Codegen/SPIRV/KernelConfig.cpp
+--- a/compiler/src/iree/compiler/Codegen/SPIRV/KernelConfig.cpp
++++ b/compiler/src/iree/compiler/Codegen/SPIRV/KernelConfig.cpp
+@@ -1391,7 +1391,7 @@
+     if (failed(setOpConfigAndEntryPointFnTranslation(
+             op->getParentOfType<mlir::FunctionOpInterface>(), op, config,
+             getSPIRVTranslationInfo(ctx, SPIRVPipeline::SubgroupReduce,
+-                                    workgroupSize)))) {
++                                    workgroupSize, subgroupSize)))) {
+       return failure();
+     }
+ 
+@@ -1512,7 +1512,7 @@
+   if (failed(setOpConfigAndEntryPointFnTranslation(
+           op->getParentOfType<mlir::FunctionOpInterface>(), op, config,
+           getSPIRVTranslationInfo(ctx, SPIRVPipeline::SubgroupReduce,
+-                                  workgroupSize)))) {
++                                  workgroupSize, subgroupSize)))) {
+     return failure();
+   }
+ 
+diff --git a/compiler/src/iree/compiler/Codegen/SPIRV/test/config_default_reduction.mlir b/compiler/src/iree/compiler/Codegen/SPIRV/test/config_default_reduction.mlir
+--- a/compiler/src/iree/compiler/Codegen/SPIRV/test/config_default_reduction.mlir
++++ b/compiler/src/iree/compiler/Codegen/SPIRV/test/config_default_reduction.mlir
+@@ -22,7 +22,7 @@
+ }
+ 
+ //  CHECK-DAG: #[[CONFIG:.+]] = #iree_codegen.lowering_config<tile_sizes = {{\[}}[1], [0, 512]{{\]}}>
+-//  CHECK-DAG: #[[TRANSLATION:.+]] = #iree_codegen.translation_info<pipeline = #iree_gpu.spirv_pipeline<SubgroupReduce> workgroup_size = [128, 1, 1]>
++//  CHECK-DAG: #[[TRANSLATION:.+]] = #iree_codegen.translation_info<pipeline = #iree_gpu.spirv_pipeline<SubgroupReduce> workgroup_size = [128, 1, 1] subgroup_size = 16>
+ //      CHECK: func.func @subgroup_reduce_f32(
+ // CHECK-SAME:     translation_info = #[[TRANSLATION]]
+ //      CHECK:   linalg.generic
+@@ -58,7 +58,7 @@
+ }
+ 
+ //  CHECK-DAG: #[[CONFIG:.+]] = #iree_codegen.lowering_config<tile_sizes = {{\[}}[1, 1], [0, 0, 512]{{\]}}>
+-//  CHECK-DAG: #[[TRANSLATION:.+]] = #iree_codegen.translation_info<pipeline = #iree_gpu.spirv_pipeline<SubgroupReduce> workgroup_size = [64, 1, 1]>
++//  CHECK-DAG: #[[TRANSLATION:.+]] = #iree_codegen.translation_info<pipeline = #iree_gpu.spirv_pipeline<SubgroupReduce> workgroup_size = [64, 1, 1] subgroup_size = 64>
+ //      CHECK: func.func @subgroup_reduce_f16(
+ // CHECK-SAME:     translation_info = #[[TRANSLATION]]
+ //      CHECK:   linalg.generic
+@@ -91,7 +91,7 @@
+ }
+ 
+ //  CHECK-DAG: #[[CONFIG:.+]] = #iree_codegen.lowering_config<tile_sizes = {{\[}}[1], [0, 64]{{\]}}>
+-//  CHECK-DAG: #[[TRANSLATION:.+]] = #iree_codegen.translation_info<pipeline = #iree_gpu.spirv_pipeline<SubgroupReduce> workgroup_size = [64, 1, 1]>
++//  CHECK-DAG: #[[TRANSLATION:.+]] = #iree_codegen.translation_info<pipeline = #iree_gpu.spirv_pipeline<SubgroupReduce> workgroup_size = [64, 1, 1] subgroup_size = 64>
+ //      CHECK: func.func @subgroup_reduce_dynamic(
+ // CHECK-SAME:     translation_info = #[[TRANSLATION]]
+ //      CHECK:   linalg.generic
+@@ -207,8 +207,8 @@
+ //  CHECK-DAG: #[[CONFIG1_FUSED:.+]] = #iree_codegen.lowering_config<tile_sizes = {{\[}}[], [256, 0, 0]{{\]}}>
+ //  CHECK-DAG: #[[CONFIG2_FUSED:.+]] = #iree_codegen.lowering_config<tile_sizes = {{\[}}[], [0, 256, 0, 0]{{\]}}>
+ //  CHECK-DAG: #[[CONFIG3_FUSED:.+]] = #iree_codegen.lowering_config<tile_sizes = {{\[}}[], [2048, 0]{{\]}}>
+-//  CHECK-DAG: #[[TRANSLATION1:.+]] = #iree_codegen.translation_info<pipeline = #iree_gpu.spirv_pipeline<SubgroupReduce> workgroup_size = [64, 1, 1]>
++//  CHECK-DAG: #[[TRANSLATION1:.+]] = #iree_codegen.translation_info<pipeline = #iree_gpu.spirv_pipeline<SubgroupReduce> workgroup_size = [64, 1, 1] subgroup_size = 32>
+-//  CHECK-DAG: #[[TRANSLATION2:.+]] = #iree_codegen.translation_info<pipeline = #iree_gpu.spirv_pipeline<SubgroupReduce> workgroup_size = [512, 1, 1]>
++//  CHECK-DAG: #[[TRANSLATION2:.+]] = #iree_codegen.translation_info<pipeline = #iree_gpu.spirv_pipeline<SubgroupReduce> workgroup_size = [512, 1, 1] subgroup_size = 32>
+ // In each of these the reduction op keeps its workgroup level while the fused
+ // consumer gets the reduction level only, so the consumer cannot outrank the
+ // reduction during workgroup root selection.
+@@ -329,7 +329,7 @@
+ 
+ //  CHECK-DAG: #[[CONFIG:.+]] = #iree_codegen.lowering_config<tile_sizes = {{\[}}[1, 1], [0, 0, 16]{{\]}}>
+ //  CHECK-DAG: #[[FUSED:.+]] = #iree_codegen.lowering_config<tile_sizes = {{\[}}[], [0, 0, 16]{{\]}}>
+-//  CHECK-DAG: #[[TRANSLATION:.+]] = #iree_codegen.translation_info<pipeline = #iree_gpu.spirv_pipeline<SubgroupReduce> workgroup_size = [16, 1, 1]>
++//  CHECK-DAG: #[[TRANSLATION:.+]] = #iree_codegen.translation_info<pipeline = #iree_gpu.spirv_pipeline<SubgroupReduce> workgroup_size = [16, 1, 1] subgroup_size = 16>
+ //      CHECK: func.func @reduction_with_permuted_consumer_and_extra_parallel_dim(
+ // CHECK-SAME:     translation_info = #[[TRANSLATION]]
+ // The reduction op owns the workgroup level...
