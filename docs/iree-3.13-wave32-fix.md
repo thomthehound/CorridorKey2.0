@@ -11,7 +11,7 @@ the first 128 of 192 contribute twice and the last 64 once; all 256 and
 compute shaders.
 
 IREE v3.13.0
-[`compiler/src/iree/compiler/Codegen/SPIRV/KernelConfig.cpp`](https://github.com/iree-org/iree/blob/v3.13.0/compiler/src/iree/compiler/Codegen/SPIRV/KernelConfig.cpp)
+`compiler/src/iree/compiler/Codegen/SPIRV/KernelConfig.cpp`
 uses `target.getPreferredSubgroupSize()` to select 32 for the
 `SubgroupReduce` pipeline. The algorithm explicitly lays out two-stage
 warp reductions assuming that width. **Both** its dynamic and static
@@ -36,7 +36,7 @@ Other translation pipelines must still be tested on their own merits.
 lowerings that do not require an explicit subgroup contract; an omitted
 subgroup argument is **not by itself evidence of a separate GEMM bug**.
 The trained native Stage1→Stage2 proof passed, so there is no currently
-reproduced native GEMM correctness failure to upstream from this work.
+reproduced native GEMM correctness failure in this test.
 
 The IREE 3.13 Vulkan device planner also sets
 `VkPhysicalDeviceVulkan13Features.subgroupSizeControl` based on the
@@ -45,18 +45,7 @@ when available. Your 8060S reports this feature. Thus the normal
 runtime device-creation path already has the required capability;
 no separate Vulkan loader shim should be needed for this experiment.
 
-The IREE upstream [issue #24688](https://github.com/iree-org/iree/issues/24688)
-already warns that a target subgroup-size configuration differing from the
-device's actual subgroup size can cause incorrect results. That issue concerns
-default Vulkan target selection. Crucially, an **earlier upstream PR,
-[#25021](https://github.com/iree-org/iree/pull/25021)**, already identified
-and proposed the same missing `SubgroupReduce` subgroup-size propagation
-in October 2026, along with a mixed-width regression. That proposal was
-closed without merging. The omission remained in upstream `main` when
-checked on 2026-10-24. Its previous discovery must be acknowledged in any
-subsequent upstream submission.
-
-## Minimal upstream-compatible patch
+## Reproducible compiler patch
 
 [`patches/iree/3.13.0-require-subgroup-size.patch`](../patches/iree/3.13.0-require-subgroup-size.patch)
 changes both `SubgroupReduce` call sites from:
@@ -72,7 +61,7 @@ getSPIRVTranslationInfo(ctx, SPIRVPipeline::SubgroupReduce,
                         workgroupSize, subgroupSize)
 ```
 
-The patch also updates **six existing upstream FileCheck assertions** to
+The patch also updates **six existing FileCheck assertions** to
 verify that the required subgroup size (16, 32, or 64, depending on the
 test target) appears in translation information. It does not alter
 the original PyTorch graph, checkpoint tensors, or arithmetic.
@@ -82,7 +71,7 @@ the original PyTorch graph, checkpoint tensors, or arithmetic.
 If Ninja reports exit status **9009** while generating
 `runtime/src/iree/vm/bytecode/isa/op_table.h` or
 `encoding_table.c`, and Windows says `python3` is unavailable,
-the compiler object files are **not** corrupted. Some upstream IREE 3.13
+the compiler object files are **not** corrupted. Some IREE 3.13
 custom commands call literal `python3`, even when CMake was given
 `Python3_EXECUTABLE`. Windows may resolve that name to its Microsoft
 Store app execution alias rather than the activated Conda interpreter.
@@ -197,27 +186,22 @@ IR/SPIR-V executable dumps. Once native reductions pass, rerun the
 original trained Stage2 and Stage1 without segmented reductions,
 individually first. Other operator classes must not be assumed fixed.
 
-For an upstream report, include the unpatched/patched compiler revision,
-`vulkaninfo` output, both generated executables and the 192-channel
-one-hot map. The original IREE compiler test is
+For reproducible validation, retain the unpatched/patched compiler revision,
+`vulkaninfo` output, generated executables and the 192-channel
+one-hot map. The compiler test is
 `compiler/src/iree/compiler/Codegen/SPIRV/test/config_default_reduction.mlir`.
 
 ### Limitations and portability
 
-Do **not** hard-code 32 for all Vulkan devices. The local GPU-validated
-patch passes the target's selected subgroup width; this is correct for
-the measured RDNA3 device but overconstrains *fixed-width* targets that
-may lack subgroup-size-control support. The **separate upstream candidate**
-requests an explicit subgroup size only when
-`target.getMinSubgroupSize() != target.getMaxSubgroupSize()` and adds
-mixed-width static and dynamic regressions, retaining implicit width on
-fixed-width devices. The candidate is structurally checked against IREE
-3.13.0 but **has not been rebuilt, FileCheck-tested or hardware-proven**.
-Do not replace the locally validated patch in the existing IREE build.
+The GPU-validated patch passes the target's selected subgroup width rather
+than forcing wave32 globally. The test device supports explicit subgroup
+size control. Fixed-width Vulkan targets may not expose that feature, so
+their required width must remain implicit. Verify this distinction before
+deploying a compiler version to devices with other capabilities.
 
-The segmented-source paths remain independent correctness controls;
-however, both trained stages have now passed with native reductions and
-the combined trained replay has also passed.
+The segmented-source lowerings are retained for controlled diagnostics,
+not normal inference. Both trained stages and their combined replay have
+passed with native reductions on the tested Radeon.
 
 ## Using the patched compiler for trained Stage1 and Stage2
 
@@ -228,15 +212,10 @@ the trained proof **does not rebuild IREE, LLVM, or MLIR**:
 .\scripts\ci\run_trained_with_patched_iree.ps1
 ```
 
-The default `Auto` mode compiles and proves the original checkpoint's
-Stage1→Stage2 computation with **all four reduction choices set to
-`native`**: RMS, downsample, fusion and the remaining wide linears.
-Unlike the original trained proof's `segmented128` RMS default, this
-makes it possible to determine whether the patched IREE compiler fixes
-native RMS reductions too. If native verification fails, the command
-preserves its consolidated diagnostics and runs a *second, separate* proof
-using the source-equivalent segmented128 controls. It reports success only
-if an entire Stage1→Stage2 proof passes.
+The default `Native` mode uses the original unsegmented reduction operators
+throughout Stage1 and Stage2. `Segmented` is an explicit diagnostic
+control. `Auto` may attempt additional controlled tests after a native
+failure but must not be treated as native acceptance.
 
 For one mode only:
 
@@ -269,45 +248,8 @@ then reuploads to Vulkan; the measured **79.229 ms median** includes this
 staging and is not a GPU-only latency metric. Frozen foundation networks,
 full video inference and a GPU-resident bridge remain outside this proof.
 
-The runtime readback fix is local to CorridorKey and bypasses another
-independent upstream defect, where `DeviceArray.to_host()` tries to
-import an unaligned NumPy pointer despite Vulkan's 4096-byte host-pointer
-alignment requirement on this device. Its upstream investigation and
-Windows CMake `python3` problem are covered separately in
-[`docs/iree-upstream-handoff.md`](iree-upstream-handoff.md).
-
-## Upstream patch submission criteria
-
-The first upstream patch should remain surgical: in the static and
-dynamic `SPIRVPipeline::SubgroupReduce` paths, pass the exact
-`subgroupSize` used to specialize the lowering into
-`getSPIRVTranslationInfo`. Do not silently force wave32 on every GPU,
-nor change the reduction arithmetic. The existing patch updates six
-`FileCheck` assertions for subgroup selection at 16, 32 and 64.
-A separate **upstream-only draft patch** at
-[`patches/iree/3.13.0-upstream-portable-subgroup-size.patch`](../patches/iree/3.13.0-upstream-portable-subgroup-size.patch)
-contains the conditional-size refinement and new
-`subgroup_size_choices = [32, 64]` test cases for both static and dynamic
-reductions. Existing fixed-width cases retain their implicit-width
-assertions. It is an **unvalidated submission candidate** and is not
-used by `build_and_prove_iree_wave32.ps1`. Its structural applicability
-has been checked against the pristine IREE 3.13.0 source. Run upstream
-FileCheck/lit tests and validate it on fixed-width and variable-width
-Vulkan targets before submission. Attribute the prior overlapping
-proposal in upstream PR #25021.
-
-The v3.13.0 native reduction failures and the patched Radeon numerical
-success have already been recorded. Before filing an upstream PR, package
-the original and passing reduction reports, compiler metadata and SPIR-V
-dumps, physical GPU properties, and the passing trained-stage reports.
-These are user-generated local artifacts, not yet publicly attached.
-Do not claim a separate GEMM bug without an independent failing case.
-Never assume that the preferred architecture subgroup is universally
-required for layout-neutral pipelines.
-
-Once a source patch passes on the user's physical GPU, producing a
-versioned `iree-base-compiler` wheel on Windows and Linux is a useful
-way to avoid repetitive local LLVM builds while an upstream release
-is pending. Treat this as a *packaging job*, not a reason to modify
-the original source graph or to pin the project permanently to v3.13.0.
-
+The runtime readback adapter uses reusable HAL staging memory when the
+installed Vulkan runtime's host-import path rejects an unaligned NumPy
+pointer. The 4096-byte pointer alignment observed on this Radeon is
+device-specific. Windows builds use an invocation-local Python executable
+shim without changing the active Conda environment.
