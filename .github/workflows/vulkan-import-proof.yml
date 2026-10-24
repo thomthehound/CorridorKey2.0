@@ -44,15 +44,16 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $tokens = $null
-          $parseErrors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            "scripts/ci/build_and_prove_iree_wave32.ps1",
-            [ref]$tokens, [ref]$parseErrors
-          ) | Out-Null
-          if ($parseErrors.Count -gt 0) {
-            $parseErrors | Format-List | Out-String | Write-Host
-            throw "PowerShell wave32 build script has syntax errors"
+          foreach ($script in @("scripts/ci/build_and_prove_iree_wave32.ps1", "scripts/ci/run_trained_with_patched_iree.ps1")) {
+            $tokens = $null
+            $parseErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $script, [ref]$tokens, [ref]$parseErrors
+            ) | Out-Null
+            if ($parseErrors.Count -gt 0) {
+              $parseErrors | Format-List | Out-String | Write-Host
+              throw "PowerShell parser failed for $script"
+            }
           }
 
       - name: Set up Python
