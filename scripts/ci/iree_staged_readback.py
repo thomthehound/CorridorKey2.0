@@ -37,7 +37,9 @@ def staged_readback(value, device, runtime) -> np.ndarray:
     )
     runtime.HalFence.create_at(semaphore, 1).wait()
     mapped = staging.map()
-    result = np.array(mapped.asarray(view.shape, np.float32), copy=True)
+    # IREE's native mapped.asarray uses dtype_descr.itemsize as an int.
+    # np.float32 is a scalar type; np.dtype('float32') is the descriptor.
+    result = np.array(mapped.asarray(view.shape, np.dtype('float32')), copy=True)
     if not np.isfinite(result).all():
         raise ValueError("Nonfinite Vulkan device result")
     return result
