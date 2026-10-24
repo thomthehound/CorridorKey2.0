@@ -68,7 +68,14 @@ function Initialize-Msvc {
     $lines = & cmd.exe /d /c "call `"$vcvars`" >nul && set"
     if ($LASTEXITCODE -ne 0) { throw "Could not initialize MSVC environment" }
     foreach ($line in $lines) {
-        if ($line -match '^([^=]+)=(.*)
+        if ($line -match '^([^=]+)=(.*)$') {
+            [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], "Process")
+        }
+    }
+    Require-Command "cl.exe"
+}
+
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $parent = Split-Path -Parent $repoRoot
 if (-not $SourceDir) { $SourceDir = Join-Path $parent "iree-wave32-v3.13.0" }
 if (-not $BuildDir) { $BuildDir = Join-Path $parent "iree-wave32-v3.13.0-build" }
@@ -145,9 +152,6 @@ try {
 
     $expectedSource = Join-Path $SourceDir "compiler\src\iree\compiler\Codegen\SPIRV\KernelConfig.cpp"
     $sourceText = [IO.File]::ReadAllText($expectedSource)
-    if (($sourceText.Split([string[]]@("workgroupSize, subgroupSize)))) {
-        # Validated below using exact syntax instead of counts on whitespace.
-    }
     $subgroupCalls = [regex]::Matches(
         $sourceText,
         "getSPIRVTranslationInfo\(ctx,\s*SPIRVPipeline::SubgroupReduce,\s*workgroupSize,\s*subgroupSize\)"
