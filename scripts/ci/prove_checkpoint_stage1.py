@@ -228,6 +228,7 @@ def run(args):
         "height": args.height,
         "width": args.width,
         "rms_reduction": args.rms_reduction,
+        "down_reduction": args.down_reduction,
         "compiled": False,
         "vulkan_execute": False,
     }
@@ -265,7 +266,8 @@ def run(args):
 
             abi = TrainedStage1ABI(stage1).eval()
             exported, signatures = export_stage1(
-                abi, inputs, rms_reduction=args.rms_reduction
+                abi, inputs, rms_reduction=args.rms_reduction,
+                down_reduction=args.down_reduction,
             )
             report["shifted_attention_signatures"] = signatures
             with torch.inference_mode():
@@ -438,6 +440,10 @@ def main():
     parser.add_argument(
         "--rms-reduction", choices=("native", "segmented128"),
         default="segmented128",
+    )
+    parser.add_argument(
+        "--down-reduction", choices=("native", "segmented128"),
+        default="native", help="Export-only Stage1 downsample lowering",
     )
     parser.add_argument(
         "--output", type=Path, default=Path("build/checkpoint-stage1")
