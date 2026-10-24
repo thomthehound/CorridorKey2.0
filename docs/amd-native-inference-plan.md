@@ -335,3 +335,30 @@ standalone RMSNorm operation. CI exercises the uninstrumented native, flattened,
 and chunked source-equivalent normalization proofs with `--no-trace-terms` on
 Linux, while keeping full term tracing enabled by default for hardware-local
 reproduction where it compiles. Neither behavior relaxes the numerical gates.
+
+## 1280-channel reduction width sweep
+
+With the official checkpoint's first-block input captured as
+`build/checkpoint-rmsnorm/input.npy`, independently compile exact
+sum-of-squares and mean-of-squares for multiple channel widths:
+
+```powershell
+python scripts/ci/prove_vulkan_reductions.py --source-input build/checkpoint-rmsnorm/input.npy --target rdna1 --execute-vulkan --output build/reduction-sweep
+```
+
+A standalone source-derived suite (using deterministic inputs) runs two
+representative widths in CI, compiling for RDNA1 on Windows and executing
+on Linux software Vulkan. The local suite reports each of the 16 GPU/CPU
+reductions, error counts, and min/median/max scaling, and names the
+Vulkan devices visible to IREE. The default IREE device is used for
+execution; on systems with multiple Vulkan devices, verify device selection.
+
+This test separates a mean-only division bug from a broken sum-of-squares
+reduction, establishes the first failing channel width, and keeps the
+compiler target explicit. Choose the target architecture that matches
+the actual GPU (e.g. rdna1 for RX 5000, rdna2 for RX 6000, rdna3 for
+RX 7000); do not mistake successful RDNA1 compilation for a correctness
+test on a newer architecture. For generated SPIR-V and lowered MLIR use
+`--dump-executables`; all compile and device artifacts are written under
+`build/reduction-sweep`. This is an isolated compiler regression test,
+not a hardcoded source-model normalization correction.

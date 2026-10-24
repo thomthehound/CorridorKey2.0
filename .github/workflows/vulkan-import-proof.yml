@@ -130,6 +130,15 @@ jobs:
             python scripts/ci/prove_checkpoint_rmsnorm.py --output build/rmsnorm-proof --target rdna1
           fi
 
+      - name: Validate wide Vulkan reductions across widths
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            python scripts/ci/prove_vulkan_reductions.py --widths 64,1280 --target llvmpipe --execute-vulkan --output build/reduction-sweep
+          else
+            python scripts/ci/prove_vulkan_reductions.py --widths 64,1280 --target rdna1 --output build/reduction-sweep
+          fi
+
       - name: Verify Stage2 diagnostic probe selection
         shell: bash
         run: |
@@ -153,5 +162,6 @@ jobs:
             build/stage2-diagnostic/
             build/stage1-proof/
             build/rmsnorm-proof/
+            build/reduction-sweep/
           if-no-files-found: warn
           retention-days: 7
