@@ -216,6 +216,21 @@ def run_terms(module, sample, reference, args):
             "mean_absolute_error": float(delta.mean()),
             "mismatched": mismatched,
         }
+        if name == "mean_square":
+            # Preserve the scalar reduction values and their ratio so an
+            # incorrect padded divisor can be distinguished from missing
+            # or repeated channels in the generated GPU reduction.
+            denominator = np.where(cpu != 0, cpu, 1.0)
+            ratios = (gpu / denominator).reshape(-1)
+            entry["cpu"] = cpu.reshape(-1).tolist()
+            entry["vulkan"] = gpu.reshape(-1).tolist()
+            entry["vulkan_over_cpu_ratio"] = ratios.tolist()
+            entry["median_vulkan_over_cpu_ratio"] = float(np.median(ratios))
+            print(
+                "[rmsnorm terms] mean_square: median Vulkan/CPU ratio="
+                f"{entry['median_vulkan_over_cpu_ratio']:.8g}",
+                flush=True,
+            )
         result["values"].append(entry)
         if mismatched and result["first_mismatch"] is None:
             result["first_mismatch"] = name

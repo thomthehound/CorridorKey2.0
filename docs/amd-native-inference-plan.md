@@ -301,3 +301,30 @@ failure is evidence of a particular backend operation rather than a
 reason to loosen the threshold. The source-derived 1280-wide fixture
 is compiled for RDNA1 on Windows and executed on software Vulkan on
 Linux CI without downloading trained weights.
+
+## Production-width RMSNorm backend reduction investigation
+
+The actual trained model's initial `pre_blocks.0.norm1` produces the first
+incorrect Vulkan values at 1280 channels. In a source-preserving standalone
+test, the GPU input, elementwise square, and trained affine weight match CPU
+exactly. The first mismatch is the mean-square reduction across 1280 channels.
+Both native-rank, flattened-rank, and two-step 256-channel source-equivalent
+reductions produce the same wrong output on the tested AMD device.
+
+The standalone proof supports an opt-in compiler-lowering comparison, retaining
+all source weights and the same final numerical acceptance criteria:
+
+```powershell
+python scripts/ci/prove_checkpoint_rmsnorm.py --checkpoint weights/corridorkey_v2.safetensors --height 64 --width 64 --target rdna1 --execute-vulkan --explore-reductions --output build/checkpoint-rmsnorm
+```
+
+This additionally tests a constant-vector matrix contraction of the squared
+channels, a power-of-two zero-padded reduction divided by the original channel
+count, and the original source normalization compiled at `O0`. Each case
+requires source/export CPU equivalence before Vulkan compilation and retains
+its own .mlir, .vmfb, GPU array, and numerical report. These are comparative
+compiler diagnostics, not production fallback selections. The report stores
+the 16 mean-square CPU and Vulkan scalar values and their ratio; a consistent
+ratio can expose a faulty padded divisor. No alternate method becomes the
+Stage2 export lowering until the trained GPU gate is passed and the performance
+trade-off is measured.
