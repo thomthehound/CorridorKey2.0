@@ -162,6 +162,7 @@ def run(args):
         "rms_reduction": args.rms_reduction,
         "down_reduction": args.down_reduction,
         "fuse_reduction": args.fuse_reduction,
+        "linear_reduction": args.linear_reduction,
         "probes": [],
         "unmatched_scopes": [],
         "first_divergence": None,
@@ -190,6 +191,7 @@ def run(args):
             model, inputs, rms_reduction=args.rms_reduction,
             down_reduction=args.down_reduction,
             fuse_reduction=args.fuse_reduction,
+            linear_reduction=args.linear_reduction,
         )
         present = {name for name, _ in model.named_modules()}
         active = tuple(
@@ -317,6 +319,8 @@ def main():
     parser.add_argument("--down-reduction", choices=("native", "segmented128"),
                         default="native")
     parser.add_argument("--fuse-reduction", choices=("native", "segmented128"),
+                        default="native")
+    parser.add_argument("--linear-reduction", choices=("native", "segmented128"),
                         default="native")
     parser.add_argument("--frames", type=int, default=1)
     parser.add_argument("--height", type=int, default=64)
