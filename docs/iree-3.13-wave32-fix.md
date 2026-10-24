@@ -75,55 +75,61 @@ verify that the required subgroup size (16, 32, or 64, depending on the
 test target) appears in translation information. It does not alter
 the original PyTorch graph, checkpoint tensors, or arithmetic.
 
-## Build the patched IREE 3.13 compiler (Windows, PowerShell)
+## One-command Windows build and AMD proof
 
-Use a **separate checkout and build directory**. Do not update Turbine or
-the 3.13 runtime during this A/B comparison. From the CorridorKey repo
-directory in the existing Conda environment:
+From the CorridorKey checkout with the existing Conda environment activated:
 
 ```powershell
-conda activate py313
+git fetch origin amd/checkpoint-environment
+git merge --ff-only FETCH_HEAD
 
-git clone --branch v3.13.0 --depth 1 https://github.com/iree-org/iree.git ..\iree-wave32
-$patch = (Resolve-Path patches\iree\3.13.0-require-subgroup-size.patch).Path
-git -C ..\iree-wave32 apply --check "$patch"
-git -C ..\iree-wave32 apply "$patch"
-git -C ..\iree-wave32 submodule update --init --recursive
-
-cmake -S ..\iree-wave32 -B ..\iree-wave32-build -G Ninja `
-  -DCMAKE_BUILD_TYPE=Release `
-  -DIREE_BUILD_PYTHON_BINDINGS=ON `
-  -DIREE_BUILD_TESTS=ON `
-  -DPython3_EXECUTABLE="$((Get-Command python).Source)"
-cmake --build ..\iree-wave32-build --parallel
-
-# Install the compiler bindings from this new build into the active Conda
-# environment. The Vulkan runtime still comes from iree-base-runtime 3.13.
-$env:CMAKE_INSTALL_MODE = "ABS_SYMLINK"
-python -m pip install --no-build-isolation -e ..\iree-wave32-build\compiler
-Remove-Item Env:\CMAKE_INSTALL_MODE
-
-python -c "import iree.compiler; print(iree.compiler.__file__)"
-python -c "import iree.runtime; print(iree.runtime.__file__)"
+.\scripts\ci\build_and_prove_iree_wave32.ps1
 ```
 
-Requires MSVC Build Tools / Developer PowerShell, Ninja, CMake, and the
-build prerequisites documented in
-[IREE's build guide](https://iree.dev/building-from-source/getting-started/).
-This is a full native compiler rebuild, not a lightweight Python
-monkeypatch. The editable installation step and dependency resolution
-may vary by the checked-out version. Ensure the Python compiler package
-actually resolves to the patched build; if not, use the generated
-`..\iree-wave32-build\.env.ps1` to set the binding paths as documented
-by IREE. Do not interpret successful compilation alone as a GPU fix.
+The script automatically clones **IREE v3.13.0** into a sibling checkout,
+applies the version-specific patch (or detects that it was already applied),
+initializes the installed Visual Studio C++ environment when necessary,
+fetches IREE submodules, builds the native compiler and Python bindings
+with CMake/Ninja, and temporarily prepends the new compiler bindings to
+`PYTHONPATH`. It then runs the existing **native, unsegmented** reduction
+and one-hot tests against the same installed IREE runtime and Turbine.
+**It does not pip-install or uninstall anything in the Conda environment.**
 
-On Linux use the equivalent CMake/Ninja build with a Conda or virtual
-environment and source `../iree-wave32-build/.env` if required.
+Git, CMake (3.26 or newer), Ninja, MSVC C++ Build Tools and the existing
+Conda Python environment must be installed. You can launch it from an
+ordinary PowerShell session; the script locates MSVC through `vswhere` if
+`cl.exe` is not already available. This is a native compiler build,
+so adequate disk space and memory are required.
+
+The default proof output is `build/subgroup-wave32-native/report.json`.
+Repeated runs preserve previous reports and select an unused numbered
+directory. The IREE source/build trees are reused incrementally.
+
+Useful options:
+
+```powershell
+# Use more build workers
+.\scripts\ci\build_and_prove_iree_wave32.ps1 -Jobs 8
+
+# Reuse an already-built patched compiler without rebuilding
+.\scripts\ci\build_and_prove_iree_wave32.ps1 -SkipBuild
+
+# Check only compiler build/import, without executing Vulkan
+.\scripts\ci\build_and_prove_iree_wave32.ps1 -SkipProof
+```
+
+The script refuses to use a checkout at any revision other than `v3.13.0`,
+refuses to consider the compiler patched without both corrected call
+sites, verifies that Python resolves the *built* compiler rather than
+the installed wheel, and requires explicit subgroup size 32 in generated
+IR before executing each GPU reduction. A failed proof leaves its
+`report.json` and executable dumps in the selected output directory.
 
 ## Verify against the original native reduction
 
-Preserve the previous failing result in `build/subgroup-investigation`.
-Run a **new** result directory with the patched compiler:
+The one-command script above runs this verification automatically.
+To perform the native proof directly with an already selected patched
+compiler, preserve the earlier failing run and use a new output directory:
 
 ```powershell
 python scripts/ci/prove_vulkan_reductions.py `
