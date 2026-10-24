@@ -244,6 +244,9 @@ def run(args):
         inputs = make_inputs(
             config, dims, args.frames, args.height, args.width
         )
+        for index, tensor in enumerate(inputs):
+            np.save(args.output / f"input_{index}.npy", tensor.numpy())
+        report["input_shapes"] = [list(t.shape) for t in inputs]
         source = reference_outputs(stage1, inputs)
         for index, value in enumerate(source):
             np.save(args.output / f"source_{index}.npy", value)
