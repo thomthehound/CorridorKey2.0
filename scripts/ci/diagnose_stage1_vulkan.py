@@ -33,7 +33,11 @@ CORE_SCOPES = (
     "enc_16.0.mlp",
     "enc_16.0",
     "down",
+    "fuse.linear_shortcut",
     "fuse.norm",
+    "fuse.w_gate",
+    "fuse.w_up",
+    "fuse.w_down",
     "fuse",
     "body_64.0.norm1",
     "body_64.0.attn",
@@ -151,6 +155,7 @@ def run(args):
         "target": args.target,
         "rms_reduction": args.rms_reduction,
         "down_reduction": args.down_reduction,
+        "fuse_reduction": args.fuse_reduction,
         "probes": [],
         "unmatched_scopes": [],
         "first_divergence": None,
@@ -178,6 +183,7 @@ def run(args):
         exported, _ = export_stage1(
             model, inputs, rms_reduction=args.rms_reduction,
             down_reduction=args.down_reduction,
+            fuse_reduction=args.fuse_reduction,
         )
         present = {name for name, _ in model.named_modules()}
         active = tuple(
@@ -303,6 +309,8 @@ def main():
     parser.add_argument("--rms-reduction", choices=("native", "segmented128"),
                         default="segmented128")
     parser.add_argument("--down-reduction", choices=("native", "segmented128"),
+                        default="native")
+    parser.add_argument("--fuse-reduction", choices=("native", "segmented128"),
                         default="native")
     parser.add_argument("--frames", type=int, default=1)
     parser.add_argument("--height", type=int, default=64)
