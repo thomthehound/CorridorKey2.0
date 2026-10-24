@@ -173,9 +173,10 @@ try {
             "-DIREE_BUILD_COMPILER=ON",
             "-DIREE_BUILD_PYTHON_BINDINGS=ON",
             "-DIREE_BUILD_TESTS=OFF",
+            "-DIREE_BUILD_SAMPLES=OFF",
             "-DPython3_EXECUTABLE=$python"
         )
-        Invoke-Checked "cmake" @("--build", $BuildDir, "--parallel", "$Jobs")
+        Invoke-Checked "cmake" @("--build", $BuildDir, "--target", "IREECompilerPythonModules", "--parallel", "$Jobs")
     }
 
     $compilerBindings = Join-Path $BuildDir "compiler\bindings\python"
