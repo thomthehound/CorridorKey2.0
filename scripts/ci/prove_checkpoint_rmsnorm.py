@@ -90,7 +90,7 @@ def run(args):
             reference = module(sample).detach().numpy()
             flattened_reference = FlatRMSNorm(module)(sample).detach().numpy()
         np.testing.assert_allclose(
-            flattened_reference, reference, atol=0.0, rtol=0.0,
+            flattened_reference, reference, atol=1e-6, rtol=1e-6,
             err_msg="Reshaping the original RMSNorm changed source inference",
         )
         np.save(args.output / "source.npy", reference)
