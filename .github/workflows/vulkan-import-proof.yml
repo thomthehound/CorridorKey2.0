@@ -162,13 +162,14 @@ jobs:
         shell: bash
         run: |
           python scripts/ci/diagnose_stage1_vulkan.py --import-only --output build/stage1-probe-check --target rdna1 --rms-reduction segmented128
+          python scripts/ci/diagnose_stage1_vulkan.py --probe-only --down-reduction segmented128 --output build/stage1-segdown-check --target rdna1 --rms-reduction segmented128
 
       - name: Verify Stage1 downsample differential fixture
         shell: bash
         run: |
           python scripts/ci/diagnose_stage1_down_vulkan.py --self-test-spatial --output build/stage1-down-probe
           python scripts/ci/diagnose_stage1_down_vulkan.py --probe-only --output build/stage1-down-probe
-          python scripts/ci/diagnose_stage1_down_vulkan.py --import-only --modes native,crop4,gemm4,gemm4runtime,seg128,spatial --output build/stage1-down-import
+          python scripts/ci/diagnose_stage1_down_vulkan.py --import-only --modes native,crop4,gemm4,gemm4runtime,seg128,seg128general,spatial --output build/stage1-down-import
 
       - name: Verify Stage2 diagnostic probe selection
         shell: bash
@@ -196,6 +197,7 @@ jobs:
             build/stage1-probe-check/
             build/stage1-down-probe/
             build/stage1-down-import/
+            build/stage1-segdown-check/
             build/rmsnorm-proof/
             build/reduction-sweep/
           if-no-files-found: warn
