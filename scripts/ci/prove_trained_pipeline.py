@@ -54,7 +54,7 @@ def run(args):
         "checkpoint": str(args.checkpoint),
         "scope": "real trained Stage1+Stage2, normalized foundation features",
         "gpu_target": args.target,
-        "rms_reduction": "segmented128",
+        "rms_reduction": args.rms_reduction,
         "down_reduction": args.down_reduction,
         "fuse_reduction": args.fuse_reduction,
         "linear_reduction": args.linear_reduction,
@@ -70,7 +70,7 @@ def run(args):
                 SCRIPTS / "prove_checkpoint_stage1.py",
                 args.checkpoint, "--frames", "1",
                 "--height", args.height, "--width", args.width,
-                "--target", args.target, "--rms-reduction", "segmented128",
+                "--target", args.target, "--rms-reduction", args.rms_reduction,
                 "--down-reduction", args.down_reduction,
                 "--fuse-reduction", args.fuse_reduction,
                 "--linear-reduction", args.linear_reduction,
@@ -88,7 +88,7 @@ def run(args):
                     "--frames", "1",
                     "--height", str(args.height), "--width", str(args.width),
                     "--target", str(args.target),
-                    "--rms-reduction", "segmented128",
+                    "--rms-reduction", args.rms_reduction,
                     "--down-reduction", args.down_reduction,
                     "--fuse-reduction", args.fuse_reduction,
                     "--linear-reduction", args.linear_reduction,
@@ -125,7 +125,7 @@ def run(args):
         invoke("Compile and prove Stage2 against actual trained Stage1 baton", [
             SCRIPTS / "prove_checkpoint_stage2.py",
             args.checkpoint, "--height", args.height, "--width", args.width,
-            "--target", args.target, "--rms-reduction", "segmented128",
+            "--target", args.target, "--rms-reduction", args.rms_reduction,
             "--rgb-input", stage1_dir / "input_0.npy",
             "--baton-input", stage1_dir / "source_0.npy",
             "--compile", "--execute-vulkan", "--output", stage2_dir,
@@ -188,6 +188,8 @@ def main():
     parser.add_argument("--height", type=int, default=64)
     parser.add_argument("--width", type=int, default=64)
     parser.add_argument("--target", default="rdna3")
+    parser.add_argument("--rms-reduction", choices=("native", "segmented128"),
+                        default="segmented128")
     parser.add_argument("--down-reduction", choices=("native", "segmented128"),
                         default="native")
     parser.add_argument("--fuse-reduction", choices=("native", "segmented128"),
