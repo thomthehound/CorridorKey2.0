@@ -17,39 +17,50 @@ import sys
 SUBGROUP_TRANSLATION = re.compile(
     r"#iree_codegen\.translation_info<"
     r"\s*pipeline\s*=\s*#iree_gpu\.spirv_pipeline<SubgroupReduce>"
-    r"\s+workgroup_size\s*=\s*\[[^\]]+\]"
+    r"\s+workgroup_size\s*=\s*\[\s*(\d+)\s*,\s*1\s*,\s*1\s*\]"
     r"\s+subgroup_size\s*=\s*(\d+)"
 )
 # Expected sizes for six translated subgroup-reduction configurations in
 # upstream compiler/src/iree/compiler/Codegen/SPIRV/test/
 # config_default_reduction.mlir, evaluated for their original targets.
-EXPECTED_SIZES = Counter({16: 2, 32: 2, 64: 2})
+EXPECTED_CASES = Counter({
+    (128, 16): 1,
+    (64, 64): 2,
+    (64, 32): 1,
+    (512, 32): 1,
+    (16, 16): 1,
+})
 
 
 def verify_output(text: str) -> Counter:
-    found = Counter(int(value) for value in SUBGROUP_TRANSLATION.findall(text))
-    for size, expected_count in EXPECTED_SIZES.items():
-        if found[size] < expected_count:
+    found = Counter(
+        (int(workgroup), int(subgroup))
+        for workgroup, subgroup in SUBGROUP_TRANSLATION.findall(text)
+    )
+    for config, expected_count in EXPECTED_CASES.items():
+        if found[config] < expected_count:
             raise AssertionError(
                 f"Expected at least {expected_count} subgroup-reduction "
-                f"translation attributes requesting {size}, got {found}; "
-                "inspect the compiler's emitted MLIR"
+                f"translations with workgroup/subgroup sizes {config}, "
+                f"got {found}; inspect the compiler's emitted MLIR"
             )
     return found
 
 
 def self_test() -> None:
-    def attribute(size: int) -> str:
+    def attribute(workgroup: int, subgroup: int) -> str:
         return (
             "#iree_codegen.translation_info<"
             "pipeline = #iree_gpu.spirv_pipeline<SubgroupReduce> "
-            f"workgroup_size = [{size}, 1, 1] subgroup_size = {size}>"
+            f"workgroup_size = [{workgroup}, 1, 1] "
+            f"subgroup_size = {subgroup}>"
         )
     output = "\n".join(
-        attribute(size) for size, count in EXPECTED_SIZES.items()
+        attribute(workgroup, subgroup)
+        for (workgroup, subgroup), count in EXPECTED_CASES.items()
         for _ in range(count)
     )
-    assert verify_output(output) == EXPECTED_SIZES
+    assert verify_output(output) == EXPECTED_CASES
     try:
         verify_output(output.replace("subgroup_size = 32", "subgroup_size = 0"))
     except AssertionError:
@@ -62,6 +73,12 @@ def self_test() -> None:
         pass
     else:
         raise AssertionError("Mismatched subgroup target was not caught")
+    try:
+        verify_output(output.replace("workgroup_size = [128", "workgroup_size = [256"))
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("Mismatched workgroup shape was not caught")
     print("[IREE codegen] fixture verifier self-test passed", flush=True)
 
 
