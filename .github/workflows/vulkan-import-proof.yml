@@ -134,9 +134,9 @@ jobs:
         shell: bash
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
-            python scripts/ci/prove_vulkan_reductions.py --widths 64,1280 --target llvmpipe --execute-vulkan --output build/reduction-sweep
+            python scripts/ci/prove_vulkan_reductions.py --widths 128,256,1280 --operations sum_square,mean_square,split128_sum_square,split128_mean_square --target llvmpipe --execute-vulkan --output build/reduction-sweep
           else
-            python scripts/ci/prove_vulkan_reductions.py --widths 64,1280 --target rdna1 --output build/reduction-sweep
+            python scripts/ci/prove_vulkan_reductions.py --widths 128,256,1280 --operations sum_square,mean_square,split128_sum_square,split128_mean_square --target rdna1 --output build/reduction-sweep
           fi
 
       - name: Verify Stage2 diagnostic probe selection

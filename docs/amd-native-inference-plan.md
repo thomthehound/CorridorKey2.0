@@ -362,3 +362,35 @@ test on a newer architecture. For generated SPIR-V and lowered MLIR use
 `--dump-executables`; all compile and device artifacts are written under
 `build/reduction-sweep`. This is an isolated compiler regression test,
 not a hardcoded source-model normalization correction.
+
+## AMD Vulkan reduction correctness — reproduction details
+
+A local Radeon 8060S running AMD's proprietary Vulkan LLPC driver
+26.8.1 reproduced an exactly **2×** result for both `sum(square(x))`
+and `mean(square(x))` on all 16 spatial tokens at widths 256, 512, 768,
+1024, 1280, and 2048. Widths 32, 64, and 128 numerically agree.
+Using the `rdna3` IREE target instead of `rdna1` did not correct
+256- or 1280-channel reductions, and the trained Stage2 output still
+failed its source comparison. This disproves a simple architecture-family
+target mismatch as the solution.
+
+The standalone reduction sweep now also supports
+`split128_sum_square` and `split128_mean_square`. Those expressions
+reduce each 128-channel slice independently and sum its partial results,
+preserving the original normalization domain and divisor. In contrast
+to dividing a known failing result by two, these tests evaluate a
+mathematically equivalent reduction graph and expose whether IREE
+merges the source's independent small reductions into the failing
+wide-reduction lowering. No such alternative has been adopted for
+production inference. Compiler and runtime package versions are
+recorded alongside the device and per-width numerical errors.
+
+Suggested focused run, using the actual checkpoint's cached RMSNorm input:
+
+```powershell
+python scripts/ci/prove_vulkan_reductions.py --source-input build/checkpoint-rmsnorm/input.npy --widths 128,192,224,255,256,257,1280 --operations sum_square,mean_square,split128_sum_square,split128_mean_square --target rdna3 --execute-vulkan --output build/reduction-sweep-segmented
+```
+
+For follow-up compiler/driver investigation, collect the generated SPIR-V
+with `--dump-executables` and compare the reduction subgroup sizes,
+workgroup sizes, and scheduling across the 128/256 boundary.
