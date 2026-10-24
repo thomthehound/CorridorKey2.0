@@ -159,6 +159,49 @@ def rt_asdevice(config, tensor):
     return rt.asdevicearray(config.device, tensor)
 
 
+def collect_executable_subgroup_metadata(directory: Path):
+    """Summarize emitted subgroup metadata without claiming a device wave size."""
+    selected = []
+    sizes = set()
+    for path in sorted(directory.rglob("*.mlir")):
+        content = path.read_text(encoding="utf-8", errors="replace")
+        for match in re.finditer(r"(?<![\\w])subgroup_size\\s*=\\s*(\\d+)", content):
+            sizes.add(int(match.group(1)))
+        for line_no, line in enumerate(content.splitlines(), start=1):
+            if ("subgroup_size" in line
+                    or "spirv.entry_point_abi" in line
+                    or "iree_codegen.dispatch_config" in line):
+                if len(selected) < 48:
+                    selected.append({
+                        "file": str(path.relative_to(directory)),
+                        "line": line_no, "text": line.strip()[:450],
+                    })
+    binaries = []
+    for path in sorted(directory.rglob("*.spv")):
+        try:
+            header = path.read_bytes()[:8]
+            if len(header) < 8:
+                continue
+            magic, version = __import__("struct").unpack("<II", header)
+            if magic != 0x07230203:
+                continue
+            binaries.append({
+                "file": str(path.relative_to(directory)),
+                "spirv_version": (
+                    f"{(version >> 16) & 255}.{(version >> 8) & 255}"
+                ),
+            })
+        except OSError:
+            continue
+    return {
+        "selected_subgroup_sizes_in_ir": sorted(sizes),
+        "warning": "IR subgroup_size values are codegen requests; "
+                   "device subgroupSize is separate. Presence of a size "
+                   "does not prove that the final Vulkan pipeline requested it.",
+        "evidence": selected, "spirv_binaries": binaries,
+    }
+
+
 def run(args):
     import iree.turbine.aot as aot
 
@@ -251,6 +294,10 @@ def run(args):
                         save_to=vmfb, target_backends=["vulkan-spirv"]
                     )
                     case["compile"] = True
+                    if args.dump_executables:
+                        case["codegen_subgroup_metadata"] = (
+                            collect_executable_subgroup_metadata(dump)
+                        )
                     if not args.execute_vulkan:
                         print(f"[reduction sweep] {name}: compiled", flush=True)
                         continue
