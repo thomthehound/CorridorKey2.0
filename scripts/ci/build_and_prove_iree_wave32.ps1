@@ -23,7 +23,8 @@ param(
     [ValidateSet("rdna1", "rdna2", "rdna3", "rdna4")]
     [string]$Target = "rdna3",
     [switch]$SkipBuild,
-    [switch]$SkipProof
+    [switch]$SkipProof,
+    [switch]$CheckPythonOnly
 )
 
 Set-StrictMode -Version Latest
@@ -122,6 +123,14 @@ if ($SourceDir -eq $repoRoot -or $BuildDir -eq $repoRoot -or $SourceDir -eq $Bui
 }
 
 try {
+    if ($CheckPythonOnly) {
+        # Smoke-test the exact cmd.exe resolution path used by Ninja without
+        # cloning IREE, calling CMake, or requiring MSVC.
+        $testDir = Join-Path ([IO.Path]::GetTempPath()) "corridorkey-python3-smoke"
+        Initialize-CondaPython3 -Directory $testDir
+        Write-Host "[wave32] Windows python3 command smoke test passed."
+        return
+    }
     foreach ($name in @("git", "cmake", "ninja", "python")) {
         Require-Command $name
     }
