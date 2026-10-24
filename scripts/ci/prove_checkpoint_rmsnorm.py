@@ -34,6 +34,110 @@ class FlatRMSNorm(torch.nn.Module):
         return self.source(x.reshape(-1, x.shape[-1])).reshape(x.shape)
 
 
+
+class RMSNormTerms(torch.nn.Module):
+    """Expose the original normalized input, reduction and affine operands."""
+
+    def __init__(self, source):
+        super().__init__()
+        self.source = source
+
+    def forward(self, x):
+        weight = self.source.weight.to(dtype=x.dtype)
+        square = x.square()
+        variance = square.mean(dim=-1, keepdim=True)
+        inverse_scale = torch.rsqrt(variance + self.source.eps)
+        unweighted = x * inverse_scale
+        weighted = unweighted * weight
+        return x, square, variance, inverse_scale, unweighted, weight, weighted
+
+
+TERM_NAMES = (
+    "input", "square", "mean_square", "inverse_scale",
+    "unweighted", "affine_weight", "weighted",
+)
+
+
+def run_terms(module, sample, reference, args):
+    """Compile and compare every term without substituting another network."""
+    import iree.turbine.aot as aot
+    import iree.runtime as rt
+
+    model = RMSNormTerms(module).eval()
+    with torch.inference_mode():
+        expected = tuple(v.detach().numpy() for v in model(sample))
+    np.testing.assert_allclose(
+        expected[-1], reference, atol=2e-5, rtol=2e-5,
+        err_msg="Explicit terms do not reproduce the source RMSNorm",
+    )
+
+    exported = torch.export.export(model, (sample,), strict=True)
+    with torch.inference_mode():
+        cpu_exported = tuple(v.detach().numpy()
+                             for v in exported.module()(sample))
+    for name, a, b in zip(TERM_NAMES, cpu_exported, expected):
+        np.testing.assert_allclose(
+            a, b, atol=2e-5, rtol=2e-5,
+            err_msg=f"CPU re-export changed term {name}",
+        )
+
+    compiled = aot.export(exported)
+    compiled.verify()
+    compiled.save_mlir(args.output / "terms.mlir")
+    compiled.session.set_flags(f"--iree-vulkan-target={args.target}")
+    compiled.session.set_flags("--iree-opt-level=O2")
+    binary_path = args.output / "terms.vmfb"
+    compiled.compile(save_to=binary_path, target_backends=["vulkan-spirv"])
+    print("[rmsnorm terms] compiled original RMSNorm algebra", flush=True)
+    result = {"compile": True, "first_mismatch": None, "values": []}
+    if not args.execute_vulkan:
+        return result
+
+    cfg = rt.Config("vulkan")
+    binary = rt.VmModule.copy_buffer(cfg.vm_instance, binary_path.read_bytes())
+    program = rt.load_vm_module(binary, cfg)
+    device_outputs = program.main(
+        rt.asdevicearray(cfg.device, sample.detach().numpy()),
+    )
+    if not isinstance(device_outputs, (tuple, list)):
+        raise AssertionError("Expected multiple RMSNorm term outputs")
+    if len(device_outputs) != len(TERM_NAMES):
+        raise AssertionError(
+            f"Expected {len(TERM_NAMES)} RMSNorm outputs, got {len(device_outputs)}"
+        )
+
+    for name, cpu, device_result in zip(TERM_NAMES, expected, device_outputs):
+        gpu = _read_device_result(cfg, device_result)
+        np.save(args.output / f"term_{name}_cpu.npy", cpu)
+        np.save(args.output / f"term_{name}_vulkan.npy", gpu)
+        if gpu.shape != cpu.shape:
+            raise AssertionError(
+                f"{name}: CPU shape {cpu.shape}, device shape {gpu.shape}"
+            )
+        if not np.isfinite(gpu).all():
+            raise AssertionError(f"{name}: nonfinite device output")
+        delta = np.abs(gpu - cpu)
+        mismatched = int((~np.isclose(gpu, cpu, atol=3e-3, rtol=3e-3)).sum())
+        entry = {
+            "name": name, "shape": list(cpu.shape),
+            "max_absolute_error": float(delta.max()),
+            "mean_absolute_error": float(delta.mean()),
+            "mismatched": mismatched,
+        }
+        result["values"].append(entry)
+        if mismatched and result["first_mismatch"] is None:
+            result["first_mismatch"] = name
+        print(
+            f"[rmsnorm terms] {name}: "
+            f"max={entry['max_absolute_error']:.8g}, "
+            f"mean={entry['mean_absolute_error']:.8g}, "
+            f"mismatched={mismatched}",
+            flush=True,
+        )
+    return result
+
+
+
 def build_source(checkpoint: Path | None, height: int, width: int):
     if checkpoint is None:
         from corridorkey.blocks import RMSNorm
@@ -96,6 +200,15 @@ def run(args):
         np.save(args.output / "source.npy", reference)
 
         import iree.turbine.aot as aot
+
+        try:
+            report["terms"] = run_terms(module, sample, reference, args)
+        except Exception as exc:
+            report["terms"] = {
+                "error": f"{type(exc).__name__}: {exc}",
+                "traceback": traceback.format_exc(),
+            }
+            print(report["terms"]["traceback"], file=sys.stderr, flush=True)
 
         for kind, variant in (
             ("native_rank", module),
@@ -178,7 +291,10 @@ def run(args):
             json.dumps(report, indent=2) + "\n", encoding="utf-8",
         )
     return int(
-        "error" in report or any(
+        "error" in report
+        or "error" in report.get("terms", {})
+        or report.get("terms", {}).get("first_mismatch") is not None
+        or any(
             "error" in item or item["numerical_match"] is False
             for item in report["cases"]
         )
