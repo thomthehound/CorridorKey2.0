@@ -21,7 +21,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import numpy as np
 import torch
 
-from prove_iree_vulkan import _read_device_result, _rms_norm_inference_math
+from prove_iree_vulkan import (
+    _read_device_result, _rms_norm_inference_math,
+    _rms_norm_segmented_128_math,
+)
 
 
 class FlatRMSNorm(torch.nn.Module):
@@ -327,6 +330,7 @@ def run(args):
             ("native_rank", module, "O2"),
             ("flat_tokens", FlatRMSNorm(module), "O2"),
             ("chunked_256", ChunkedRMSNorm(module), "O2"),
+            ("segmented128", module, "O2"),
         ]
         if args.explore_reductions:
             # Distinct lowered graph families, including an unoptimized
@@ -344,7 +348,11 @@ def run(args):
                 exported = torch.export.export(
                     variant, (sample,), strict=True,
                 ).run_decompositions({
-                    torch.ops.aten.rms_norm.default: _rms_norm_inference_math,
+                    torch.ops.aten.rms_norm.default: (
+                        _rms_norm_segmented_128_math
+                        if kind == "segmented128"
+                        else _rms_norm_inference_math
+                    ),
                 })
                 with torch.inference_mode():
                     cpu_exported = exported.module()(sample).detach().numpy()

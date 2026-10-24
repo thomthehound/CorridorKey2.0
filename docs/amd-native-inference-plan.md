@@ -394,3 +394,33 @@ python scripts/ci/prove_vulkan_reductions.py --source-input build/checkpoint-rms
 For follow-up compiler/driver investigation, collect the generated SPIR-V
 with `--dump-executables` and compare the reduction subgroup sizes,
 workgroup sizes, and scheduling across the 128/256 boundary.
+
+## Opt-in segmented Stage2 RMSNorm import
+
+Local testing on the Radeon 8060S, AMD proprietary Vulkan 26.8.1
+with IREE compiler/runtime 3.13.0, found that full-width source
+sum- and mean-square reductions above 128 channels are miscomputed.
+A two-stage sum of contiguous <=128-element slices agrees with CPU
+for all tested widths, including the production width of 1280.
+This is algebraically the **same full-domain mean**, not an ad hoc
+multiplicative correction. The learned affine parameter, epsilon, and
+normalized shape remain unchanged.
+
+The export-only `segmented128` RMSNorm decomposition is deliberately
+opt-in until the full checkpoint-backed Vulkan result and runtime cost
+are validated. The default `native` remains an independent failure
+control. This same lowering supports multidimensional normalized shapes
+by flattening only their trailing normalized axes during the operation.
+
+Test with the already-downloaded real checkpoint:
+
+```powershell
+python scripts/ci/prove_checkpoint_rmsnorm.py --checkpoint weights/corridorkey_v2.safetensors --height 64 --width 64 --target rdna3 --execute-vulkan --no-trace-terms --output build/checkpoint-rmsnorm-segmented
+python scripts/ci/prove_checkpoint_stage2.py weights/corridorkey_v2.safetensors --height 64 --width 64 --compile --execute-vulkan --target rdna3 --rms-reduction segmented128 --output build/checkpoint-stage2-segmented
+```
+
+Both source/export CPU and source/device results remain independently
+checked. If the real model passes, benchmark the native and segmented
+kernels and pursue an upstream compiler reduction fix rather than
+permanently making this model-specific. Keep final acceptance attached
+to an actual trained checkpoint executing on physical AMD hardware.

@@ -163,7 +163,7 @@ def self_test():
         cpu_args = argparse.Namespace(
             checkpoint=checkpoint, output=Path(tmp) / "cpu-only",
             height=32, width=32, compile=False,
-            execute_vulkan=False, target="rdna1",
+            execute_vulkan=False, target="rdna1", rms_reduction="native",
         )
         if run(cpu_args) != 0:
             raise AssertionError("CPU-only checkpoint inference failed")
@@ -194,6 +194,7 @@ def run(args) -> int:
         "vulkan_execute": False,
         "image_height": args.height,
         "image_width": args.width,
+        "rms_reduction": args.rms_reduction,
     }
     try:
         torch.manual_seed(1942)
@@ -234,7 +235,9 @@ def run(args) -> int:
 
             model = ChannelLastStage2Result(stage2).eval()
 
-            exported, specialized = export_stage2(model, rgb, baton)
+            exported, specialized = export_stage2(
+                model, rgb, baton, rms_reduction=args.rms_reduction
+            )
             with torch.inference_mode():
                 output = _as_arrays(exported.module()(rgb, baton))
             output = tuple(t.transpose(0, 1, 4, 2, 3).copy() for t in output)
@@ -319,6 +322,12 @@ def main() -> int:
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--execute-vulkan", action="store_true")
     parser.add_argument("--target", default="rdna1")
+    parser.add_argument(
+        "--rms-reduction", choices=("native", "segmented128"),
+        default="native",
+        help="Opt into source-equivalent segmented RMSNorm for Vulkan "
+             "compilation; native retains the original failure baseline",
+    )
     args = parser.parse_args()
     if args.self_test:
         self_test()

@@ -121,6 +121,15 @@ jobs:
             python scripts/ci/prove_stage2_vulkan.py --output build/stage2-proof --target rdna1
           fi
 
+      - name: Compile segmented complete Stage2 source fixture
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            python scripts/ci/prove_stage2_vulkan.py --output build/stage2-segmented --execute-vulkan --target llvmpipe --rms-reduction segmented128
+          else
+            python scripts/ci/prove_stage2_vulkan.py --output build/stage2-segmented --target rdna1 --rms-reduction segmented128
+          fi
+
       - name: Compile production-width RMSNorm source module
         shell: bash
         run: |
@@ -159,6 +168,7 @@ jobs:
           path: |
             build/vulkan-proof/
             build/stage2-proof/
+            build/stage2-segmented/
             build/stage2-diagnostic/
             build/stage1-proof/
             build/rmsnorm-proof/

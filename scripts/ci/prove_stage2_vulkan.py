@@ -24,6 +24,7 @@ import iree.turbine.aot as aot
 from prove_iree_vulkan import (
     _read_device_result,
     _rms_norm_inference_math,
+    _rms_norm_segmented_128_math,
     _sdpa_inference_math,
     GeometryMaskSwin2DAttention,
 )
@@ -99,7 +100,11 @@ def create_stage2(*, num_blocks=8):
     return ChannelLastStage2Result(model).eval(), rgb, baton, reference
 
 
-def export_stage2(model, rgb, baton):
+def export_stage2(model, rgb, baton, *, rms_reduction="native"):
+    """Preserve source Stage2 with selectable export-only RMSNorm lowerings."""
+    if rms_reduction not in ("native", "segmented128"):
+        raise ValueError(f"Unsupported RMSNorm reduction: {rms_reduction}")
+
     import corridorkey.blocks as blocks
 
     # The region IDs depend only on Stage2's known token-grid geometry.
@@ -211,7 +216,10 @@ def export_stage2(model, rgb, baton):
 
     exported = exported.run_decompositions({
         torch.ops.aten.scaled_dot_product_attention.default: _sdpa_inference_math,
-        torch.ops.aten.rms_norm.default: _rms_norm_inference_math,
+        torch.ops.aten.rms_norm.default: (
+            _rms_norm_segmented_128_math if rms_reduction == "segmented128"
+            else _rms_norm_inference_math
+        ),
     })
     bad = [
         str(n.target) for n in exported.graph.nodes
@@ -228,6 +236,11 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--target", required=True)
     parser.add_argument("--execute-vulkan", action="store_true")
+    parser.add_argument(
+        "--rms-reduction", choices=("native", "segmented128"),
+        default="native",
+        help="Export-only RMSNorm lowering; native is the control baseline",
+    )
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     status = {
@@ -238,11 +251,14 @@ def main() -> int:
         "compile": False,
         "vulkan_execute": False,
         "target": args.target,
+        "rms_reduction": args.rms_reduction,
     }
     try:
         model, rgb, baton, expected = create_stage2()
         np.save(args.output / "reference.npy", expected)
-        exported, profile_count = export_stage2(model, rgb, baton)
+        exported, profile_count = export_stage2(
+            model, rgb, baton, rms_reduction=args.rms_reduction
+        )
         status["geometry_signatures"] = profile_count
         with torch.inference_mode():
             imported_output = exported.module()(rgb, baton).detach().cpu().numpy()

@@ -334,6 +334,46 @@ def _rms_norm_inference_math(
     return normalized
 
 
+def _rms_norm_segmented_128_math(
+    input: torch.Tensor,
+    normalized_shape,
+    weight=None,
+    eps=None,
+):
+    """Lower RMSNorm with full-domain statistics in 128-element segments.
+
+    Separate sums over at most 128 values, then sum the partial totals.
+    Divide by the original number of normalized elements exactly once.
+    The source affine weight, epsilon, and normalized dimensions are intact.
+    """
+    import math
+
+    ndim = len(normalized_shape)
+    if not ndim:
+        raise ValueError("RMSNorm normalized_shape must not be empty")
+    width = math.prod(int(dim) for dim in normalized_shape)
+    epsilon = torch.finfo(input.dtype).eps if eps is None else eps
+    accumulator = input.float() if input.dtype in (
+        torch.float16, torch.bfloat16
+    ) else input
+    flat = accumulator.reshape(*accumulator.shape[:-ndim], width)
+    squared = flat.square()
+    if width <= 128:
+        mean_square = squared.mean(dim=-1, keepdim=True)
+    else:
+        partials = torch.cat([
+            squared[..., start:start + 128].sum(dim=-1, keepdim=True)
+            for start in range(0, width, 128)
+        ], dim=-1)
+        mean_square = partials.sum(dim=-1, keepdim=True) / width
+    normalized = (
+        flat * torch.rsqrt(mean_square + epsilon)
+    ).reshape(accumulator.shape).to(input.dtype)
+    if weight is not None:
+        normalized = normalized * weight.to(input.dtype)
+    return normalized
+
+
 def _sdpa_inference_math(
     query: torch.Tensor,
     key: torch.Tensor,
