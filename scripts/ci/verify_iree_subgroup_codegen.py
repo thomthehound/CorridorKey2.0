@@ -23,7 +23,7 @@ SUBGROUP_TRANSLATION = re.compile(
 # Expected sizes for six translated subgroup-reduction configurations in
 # upstream compiler/src/iree/compiler/Codegen/SPIRV/test/
 # config_default_reduction.mlir, evaluated for their original targets.
-EXPECTED_SIZES = Counter({16: 2, 32: 2, 64: 3})
+EXPECTED_SIZES = Counter({16: 2, 32: 2, 64: 2})
 
 
 def verify_output(text: str) -> Counter:
