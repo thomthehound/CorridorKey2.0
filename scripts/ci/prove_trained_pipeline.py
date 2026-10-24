@@ -57,6 +57,7 @@ def run(args):
         "rms_reduction": "segmented128",
         "down_reduction": args.down_reduction,
         "fuse_reduction": args.fuse_reduction,
+        "linear_reduction": args.linear_reduction,
         "foundation_networks_executed": False,
         "native_cpp_runtime": False,
         "stage1": False,
@@ -72,6 +73,7 @@ def run(args):
                 "--target", args.target, "--rms-reduction", "segmented128",
                 "--down-reduction", args.down_reduction,
                 "--fuse-reduction", args.fuse_reduction,
+                "--linear-reduction", args.linear_reduction,
                 "--compile", "--execute-vulkan", "--output", stage1_dir,
             ])
         except subprocess.CalledProcessError:
@@ -89,6 +91,7 @@ def run(args):
                     "--rms-reduction", "segmented128",
                     "--down-reduction", args.down_reduction,
                     "--fuse-reduction", args.fuse_reduction,
+                    "--linear-reduction", args.linear_reduction,
                     "--output", str(diagnostic_dir),
                 ]
                 print(
@@ -188,6 +191,8 @@ def main():
     parser.add_argument("--down-reduction", choices=("native", "segmented128"),
                         default="native")
     parser.add_argument("--fuse-reduction", choices=("native", "segmented128"),
+                        default="native")
+    parser.add_argument("--linear-reduction", choices=("native", "segmented128"),
                         default="native")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=1)
