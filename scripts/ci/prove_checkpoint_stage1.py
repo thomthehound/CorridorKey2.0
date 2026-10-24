@@ -443,7 +443,7 @@ def main():
     parser.add_argument("--target", default="rdna3")
     parser.add_argument(
         "--rms-reduction", choices=("native", "segmented128"),
-        default="segmented128",
+        default="native",
     )
     parser.add_argument(
         "--down-reduction", choices=("native", "segmented128"),
