@@ -19,6 +19,8 @@ from pathlib import Path
 
 import numpy as np
 
+from iree_staged_readback import staged_readback
+
 
 def load_array(path: Path) -> np.ndarray:
     result = np.load(path, allow_pickle=False)
@@ -50,9 +52,9 @@ def compare(actual, expected, label, atol=3e-3, rtol=3e-3):
     return report
 
 
-def readback(value) -> np.ndarray:
-    """Read IREE Vulkan device-array data through its public host API."""
-    result = np.asarray(value.to_host())
+def readback(value, device, runtime) -> np.ndarray:
+    """Read device-local Vulkan data via HAL-managed staging memory."""
+    result = staged_readback(value, device, runtime)
     if result.dtype != np.float32 or not np.isfinite(result).all():
         raise ValueError("Nonfinite or non-float32 Vulkan result")
     return result
@@ -84,7 +86,7 @@ def execute(args):
         "runs": args.runs,
         "warmup": args.warmup,
         "torch_runtime": False,
-        "interstage_transfer": "Vulkan readback -> CPU NHWC/NCHW -> upload",
+        "interstage_transfer": "Vulkan HAL staging readback -> CPU NHWC/NCHW -> upload",
         "success": False,
     }
     try:
@@ -123,8 +125,8 @@ def execute(args):
                     f"Stage1 returned {len(stage1_output)} outputs, expected "
                     "baton, aux and optional bottleneck"
                 )
-            baton_nhwc = readback(stage1_output[0])
-            aux_nhwc = readback(stage1_output[1])
+            baton_nhwc = readback(stage1_output[0], config.device, rt)
+            aux_nhwc = readback(stage1_output[1], config.device, rt)
             if baton_nhwc.shape[:2] != (batch, frames) or (
                 baton_nhwc.shape[2:4] != (height // 16, width // 16)
             ):
@@ -140,7 +142,7 @@ def execute(args):
             if len(stage2_output) not in (1, 2):
                 raise AssertionError("Stage2 output count differs from source")
             final_outputs = tuple(
-                readback(o).transpose(0, 1, 4, 2, 3).copy()
+                readback(o, config.device, rt).transpose(0, 1, 4, 2, 3).copy()
                 for o in stage2_output
             )
             for final in final_outputs:
