@@ -230,6 +230,7 @@ def run(args):
         "rms_reduction": args.rms_reduction,
         "down_reduction": args.down_reduction,
         "fuse_reduction": args.fuse_reduction,
+        "linear_reduction": args.linear_reduction,
         "compiled": False,
         "vulkan_execute": False,
     }
@@ -270,6 +271,7 @@ def run(args):
                 abi, inputs, rms_reduction=args.rms_reduction,
                 down_reduction=args.down_reduction,
                 fuse_reduction=args.fuse_reduction,
+                linear_reduction=args.linear_reduction,
             )
             report["shifted_attention_signatures"] = signatures
             with torch.inference_mode():
@@ -450,6 +452,10 @@ def main():
     parser.add_argument(
         "--fuse-reduction", choices=("native", "segmented128"),
         default="native", help="Export-only Stage1 fusion linear lowering",
+    )
+    parser.add_argument(
+        "--linear-reduction", choices=("native", "segmented128"),
+        default="native", help="Export-only Stage1 wide learned linears",
     )
     parser.add_argument(
         "--output", type=Path, default=Path("build/checkpoint-stage1")
