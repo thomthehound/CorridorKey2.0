@@ -32,7 +32,10 @@ class VulkanReadback:
         if self.strategy == "runtime":
             try:
                 result = np.asarray(value.to_host())
-            except ValueError as exc:
+            except Exception as exc:
+                # HAL status errors can be raised as backend-specific
+                # exception types; only the diagnosed alignment failure
+                # authorizes the staging fallback.
                 if "minImportedHostPointerAlignment" not in str(exc):
                     raise
                 self.strategy = "staging"
