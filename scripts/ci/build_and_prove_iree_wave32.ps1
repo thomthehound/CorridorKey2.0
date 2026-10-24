@@ -77,6 +77,7 @@ function Initialize-Msvc {
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $parent = Split-Path -Parent $repoRoot
+$defaultOutput = [string]::IsNullOrWhiteSpace($OutputDir)
 if (-not $SourceDir) { $SourceDir = Join-Path $parent "iree-wave32-v3.13.0" }
 if (-not $BuildDir) { $BuildDir = Join-Path $parent "iree-wave32-v3.13.0-build" }
 if (-not $OutputDir) { $OutputDir = Join-Path $repoRoot "build\subgroup-wave32-native" }
@@ -211,7 +212,16 @@ try {
 
     if ((Test-Path -LiteralPath $OutputDir) -and
         @(Get-ChildItem -LiteralPath $OutputDir -Force).Count -gt 0) {
-        throw "Output directory is not empty: $OutputDir. Use -OutputDir to preserve prior evidence."
+        if (-not $defaultOutput) {
+            throw "Output directory is not empty: $OutputDir; choose another -OutputDir."
+        }
+        $baseOutput = $OutputDir
+        $ordinal = 2
+        do {
+            $OutputDir = "$baseOutput-$ordinal"
+            $ordinal++
+        } while (Test-Path -LiteralPath $OutputDir)
+        Write-Host "[wave32] Existing evidence preserved; new output: $OutputDir"
     }
     New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
