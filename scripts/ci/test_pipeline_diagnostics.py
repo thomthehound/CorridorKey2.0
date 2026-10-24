@@ -10,6 +10,7 @@ from pathlib import Path
 from collect_pipeline_diagnostics import (
     BUNDLE_NAME, load_reports, make_bundle, write_bundle,
 )
+from diagnose_stage1_vulkan import diagnostic_has_mismatch
 
 
 def dump(path: Path, payload: dict):
@@ -18,6 +19,17 @@ def dump(path: Path, payload: dict):
 
 
 def run():
+    assert not diagnostic_has_mismatch({
+        "first_divergence": None, "final_output_mismatches": [],
+    })
+    assert diagnostic_has_mismatch({
+        "first_divergence": None,
+        "final_output_mismatches": [{"name": "final_2", "mismatched": 7}],
+    })
+    assert diagnostic_has_mismatch({
+        "first_divergence": "probe_down", "final_output_mismatches": [],
+    })
+    assert diagnostic_has_mismatch({"error": "Vulkan dispatch failed"})
     with tempfile.TemporaryDirectory() as temporary:
         output = Path(temporary)
         dump(output / "report.json", {
