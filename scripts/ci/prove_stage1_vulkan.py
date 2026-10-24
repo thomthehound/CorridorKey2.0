@@ -21,7 +21,8 @@ import numpy as np
 import torch
 
 from prove_iree_vulkan import (
-    _read_device_result, _rms_norm_inference_math, _sdpa_inference_math,
+    _read_device_result, _rms_norm_inference_math,
+    _rms_norm_segmented_128_math, _sdpa_inference_math,
 )
 
 
@@ -121,7 +122,9 @@ def create_stage1():
     return Stage1OutputABI(model).eval(), args, expected
 
 
-def export_stage1(model, args):
+def export_stage1(model, args, *, rms_reduction="native"):
+    if rms_reduction not in ("native", "segmented128"):
+        raise ValueError(f"Unsupported Stage1 RMSNorm lowering: {rms_reduction}")
     import corridorkey.blocks as blocks
 
     # Evaluate the source's static shifted-region cache on CPU for this
@@ -182,8 +185,10 @@ def export_stage1(model, args):
     exported = exported.run_decompositions({
         torch.ops.aten.scaled_dot_product_attention.default:
             _sdpa_inference_math,
-        torch.ops.aten.rms_norm.default:
-            _rms_norm_inference_math,
+        torch.ops.aten.rms_norm.default: (
+            _rms_norm_segmented_128_math if rms_reduction == "segmented128"
+            else _rms_norm_inference_math
+        ),
     })
     unconverted = [
         str(node.target) for node in exported.graph.nodes
@@ -216,7 +221,8 @@ def check_results(actual, expected, prefix, atol, rtol):
 def run(args):
     report = {"scope": "original Stage1; reduced untrained two-frame profile",
               "checkpoint": False, "recurrent_sites": False,
-              "import": False, "compile": False, "vulkan_execute": False}
+              "import": False, "compile": False, "vulkan_execute": False,
+              "rms_reduction": args.rms_reduction}
     args.output.mkdir(parents=True, exist_ok=True)
     try:
         model, samples, expected = create_stage1()
@@ -224,7 +230,9 @@ def run(args):
         for i, value in enumerate(expected):
             np.save(args.output / f"source_{i}.npy", value)
 
-        exported, signatures = export_stage1(model, samples)
+        exported, signatures = export_stage1(
+            model, samples, rms_reduction=args.rms_reduction
+        )
         report["region_signatures"] = signatures
         with torch.inference_mode():
             cpu = tuple(t.detach().numpy() for t in exported.module()(*samples))
@@ -282,6 +290,10 @@ def main():
     parser.add_argument("--target", default="llvmpipe")
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--execute-vulkan", action="store_true")
+    parser.add_argument(
+        "--rms-reduction", choices=("native", "segmented128"),
+        default="native", help="Export-only source-equivalent RMSNorm lowering",
+    )
     args = parser.parse_args()
     if args.execute_vulkan and not args.compile:
         parser.error("--execute-vulkan requires --compile")
