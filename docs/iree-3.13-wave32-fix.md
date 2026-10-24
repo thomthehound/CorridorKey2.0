@@ -28,7 +28,22 @@ The 2× result and missing subgroup metadata are consistent with it;
 device execution of the patched compiler is still needed to demonstrate
 that this is the complete numerical root cause. Matrix projections
 using other lowering pipelines may have separate subgroup-contract
-mistakes, so do not claim all trained inference corrected yet.
+mistakes, so do not claim all trained inference corrected yet. In
+particular, `setMatmulOpConfig` within the same IREE file derives a
+preferred subgroup width and passes it to matmul tiling helpers, but the
+`MatmulPromoteVectorize` translation call explicitly supplies
+`std::nullopt`, while the `BaseVectorize` translation call omits the
+subgroup argument. This is a **separate audit target** for Stage1's
+trained matrix-projection failures. It is not modified by the reduction
+patch: keep those questions independent until a controlled native GEMM
+A/B establishes whether the same correction is required.
+
+The IREE 3.13 Vulkan device planner also sets
+`VkPhysicalDeviceVulkan13Features.subgroupSizeControl` based on the
+physical-device feature and marks `IREE_HAL_VULKAN_FEATURE_ENABLE_SUBGROUP_SIZE_CONTROL`
+when available. Your 8060S reports this feature. Thus the normal
+runtime device-creation path already has the required capability;
+no separate Vulkan loader shim should be needed for this experiment.
 
 ## Minimal upstream-compatible patch
 
