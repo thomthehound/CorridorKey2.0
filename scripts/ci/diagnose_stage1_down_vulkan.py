@@ -24,33 +24,62 @@ import torch.nn.functional as F
 class DownsampleVariant(torch.nn.Module):
     def __init__(self, conv: torch.nn.Conv2d, mode: str):
         super().__init__()
-        if mode not in ("native", "im2col", "crop4", "gemm4", "spatial", "unfold"):
+        if mode not in ("native", "im2col", "crop4", "gemm4", "gemm4runtime",
+                         "seg128", "spatial", "unfold"):
             raise ValueError(f"Unknown convolution variant: {mode}")
-        if mode in ("crop4", "gemm4"):
+        if mode in ("crop4", "gemm4", "gemm4runtime", "seg128"):
             # This exact reduction holds only for one output cell: at 4x4
             # input, the padded k8/s4 convolution visits only its center taps.
             if (conv.kernel_size != (8, 8) or conv.stride != (4, 4)
                     or conv.padding != (2, 2) or conv.dilation != (1, 1)):
                 raise ValueError("4x4 variants require k8/s4/p2/d1")
-        if mode in ("crop4", "gemm4", "spatial", "unfold") and conv.groups != 1:
+        if mode in ("crop4", "gemm4", "gemm4runtime", "seg128",
+                    "spatial", "unfold") and conv.groups != 1:
             raise ValueError("Matmul variants require groups=1")
         self.conv = conv
         self.mode = mode
 
-    def forward(self, x):
+    def forward(self, x, runtime_weight=None, runtime_bias=None):
         if self.mode in ("native", "im2col"):
             return self.conv(x)
         conv = self.conv
-        if self.mode in ("crop4", "gemm4"):
+        if self.mode in ("crop4", "gemm4", "gemm4runtime", "seg128"):
             if x.shape[-2:] != (4, 4):
-                raise ValueError("crop4/gemm4 are exact only for 4x4 activations")
+                raise ValueError("4x4 diagnostic variants require 4x4 activations")
             # For k8/s4/p2 and 4x4 input, only taps [2:6,2:6]
             # overlap the image. These are slices of the trained weights.
-            weight = conv.weight[:, :, 2:6, 2:6]
+            if self.mode == "gemm4runtime":
+                if runtime_weight is None or runtime_bias is None:
+                    raise ValueError("Runtime GEMM needs weight and bias inputs")
+                weight = runtime_weight
+                bias = runtime_bias
+            else:
+                weight = conv.weight[:, :, 2:6, 2:6]
+                bias = conv.bias
             if self.mode == "crop4":
-                return F.conv2d(x, weight, conv.bias, stride=4)
-            output = F.linear(x.reshape(x.shape[0], -1),
-                              weight.reshape(conv.out_channels, -1), conv.bias)
+                return F.conv2d(x, weight, bias, stride=4)
+            flattened = x.reshape(x.shape[0], -1)
+            matrix = weight.reshape(conv.out_channels, -1)
+            if self.mode == "seg128":
+                # Partition the original 8192-element dot product into
+                # independent <=128-element GEMMs, then sum partial values.
+                # No compensation factors or modifications of trained weights.
+                reduction_width = flattened.shape[-1]
+                segment_width = min(128, reduction_width)
+                if reduction_width % segment_width:
+                    raise ValueError("Segment width must exactly divide features")
+                segments = reduction_width // segment_width
+                lhs = flattened.reshape(
+                    x.shape[0], segments, segment_width
+                ).transpose(0, 1)
+                rhs = matrix.reshape(
+                    conv.out_channels, segments, segment_width
+                ).permute(1, 2, 0)
+                output = torch.bmm(lhs, rhs).sum(dim=0)
+                if bias is not None:
+                    output = output + bias
+            else:
+                output = F.linear(flattened, matrix, bias)
             return output.reshape(x.shape[0], conv.out_channels, 1, 1)
 
         height = (
@@ -99,6 +128,19 @@ class DownsampleVariant(torch.nn.Module):
 
 
 
+def variant_inputs(mode, conv, activation):
+    if mode == "gemm4runtime":
+        if conv.bias is None:
+            raise ValueError("Runtime GEMM currently requires bias")
+        # Clone parameters into independent, explicit runtime tensors.
+        return (
+            activation,
+            conv.weight.detach()[:, :, 2:6, 2:6].contiguous().clone(),
+            conv.bias.detach().clone(),
+        )
+    return (activation,)
+
+
 def self_test_spatial():
     """Verify spatial gather order against the original convolution geometry."""
     torch.manual_seed(20261024)
@@ -108,16 +150,17 @@ def self_test_spatial():
         x = torch.randn(2, 8, height, width)
         with torch.inference_mode():
             expected = conv(x).numpy()
-        modes = ("spatial", "crop4", "gemm4") if (
-            height, width
-        ) == (4, 4) else ("spatial",)
+        modes = (
+            "spatial", "crop4", "gemm4", "gemm4runtime", "seg128"
+        ) if (height, width) == (4, 4) else ("spatial",)
         for mode in modes:
             variant = DownsampleVariant(conv, mode).eval()
             with torch.inference_mode():
-                direct = variant(x).numpy()
+                call_args = variant_inputs(mode, conv, x)
+                direct = variant(*call_args).numpy()
                 exported = torch.export.export(
-                    variant, (x,), strict=True
-                ).module()(x).detach().numpy()
+                    variant, call_args, strict=True
+                ).module()(*call_args).detach().numpy()
             np.testing.assert_allclose(
                 direct, expected, atol=2e-5, rtol=2e-5,
                 err_msg=f"{mode}: shape {(height, width)}",
@@ -236,16 +279,26 @@ def run(args):
             entry = report["variants"][mode] = {}
             try:
                 variant = DownsampleVariant(conv, mode).eval()
+                call_args = variant_inputs(mode, conv, activation)
                 with torch.inference_mode():
-                    direct = variant(activation).detach().numpy().copy()
+                    direct = variant(*call_args).detach().numpy().copy()
                 entry["cpu"] = stats(direct, reference)
                 np.testing.assert_allclose(
                     direct, reference, atol=2e-5, rtol=2e-5,
                     err_msg=f"{mode} changed source convolution on CPU",
                 )
-                exported = torch.export.export(variant, (activation,), strict=True)
+                exported = torch.export.export(variant, call_args, strict=True)
                 with torch.inference_mode():
-                    exported_cpu = exported.module()(activation).detach().numpy()
+                    exported_cpu = exported.module()(*call_args).detach().numpy()
+                if mode == "gemm4runtime":
+                    from torch.export.graph_signature import InputKind
+                    if any(
+                        spec.kind == InputKind.PARAMETER
+                        for spec in exported.graph_signature.input_specs
+                    ):
+                        raise AssertionError(
+                            "Runtime GEMM accidentally captured module parameters"
+                        )
                 np.testing.assert_allclose(
                     exported_cpu, reference, atol=2e-5, rtol=2e-5,
                     err_msg=f"{mode} changed source convolution during export",
@@ -283,9 +336,10 @@ def run(args):
                     config.vm_instance, vmfb.read_bytes()
                 )
                 program = rt.load_vm_module(module, config)
-                result = program.main(
-                    rt.asdevicearray(config.device, activation.numpy())
-                )
+                result = program.main(*(
+                    rt.asdevicearray(config.device, tensor.detach().numpy())
+                    for tensor in call_args
+                ))
                 if isinstance(result, (tuple, list)):
                     if len(result) != 1:
                         raise AssertionError("Expected one downsample result")
@@ -347,8 +401,9 @@ def main():
     parser.add_argument("--frames", type=int, default=1)
     parser.add_argument("--target", default="rdna3")
     parser.add_argument(
-        "--modes", default="native,crop4,gemm4,spatial",
-        help="Comma-separated variants: native,im2col,crop4,gemm4,spatial,unfold",
+        "--modes", default="native,gemm4,gemm4runtime,seg128",
+        help="Comma-separated variants: native,im2col,crop4,gemm4,"
+             "gemm4runtime,seg128,spatial,unfold",
     )
     parser.add_argument("--output", type=Path, required=True)
     group = parser.add_mutually_exclusive_group()
@@ -360,12 +415,13 @@ def main():
         return 0
     args.modes = tuple(part.strip() for part in args.modes.split(","))
     if not args.modes or any(
-        part not in ("native", "im2col", "crop4", "gemm4", "spatial", "unfold")
+        part not in ("native", "im2col", "crop4", "gemm4", "gemm4runtime",
+                     "seg128", "spatial", "unfold")
         for part in args.modes
     ) or len(set(args.modes)) != len(args.modes):
         parser.error(
             "--modes must select unique members of "
-            "native,im2col,crop4,gemm4,spatial,unfold"
+            "native,im2col,crop4,gemm4,gemm4runtime,seg128,spatial,unfold"
         )
     if args.checkpoint and not args.checkpoint.is_file():
         parser.error(f"Checkpoint not found: {args.checkpoint}")
