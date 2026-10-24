@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 import torch
+from torch.export.graph_signature import OutputKind, OutputSpec, TensorArgument
 from torch.utils import _pytree as pytree
 
 
@@ -82,7 +83,9 @@ def expose_stage1_boundaries(exported, scopes=CORE_SCOPES):
     captured independently to distinguish the input, attention, and MLP.
     Never silently accept an absent scope: report it in the manifest.
     """
-    gm = exported.module()
+    # Instrument the source ExportedProgram directly. Re-exporting its
+    # unlifted module generates an unsupported copy_ for hint_quality.
+    gm = exported.graph_module
     selected = []
     missed = []
     for scope in scopes:
@@ -106,14 +109,33 @@ def expose_stage1_boundaries(exported, scopes=CORE_SCOPES):
     previous = out.args[0]
     if not isinstance(previous, (list, tuple)):
         previous = (previous,)
+    output_specs = exported.graph_signature.output_specs
+    if len(previous) != len(output_specs):
+        raise AssertionError("Stage1 exported graph output/signature mismatch")
+    final_count = sum(
+        spec.kind == OutputKind.USER_OUTPUT for spec in output_specs
+    )
+    if final_count == 0:
+        raise AssertionError("Stage1 export has no user-visible outputs")
+
     names = [f"probe_{scope}" for scope, _ in selected]
     out.args = (tuple(previous) + tuple(node for _, node in selected),)
+    output_specs.extend(
+        OutputSpec(OutputKind.USER_OUTPUT, TensorArgument(node.name), None)
+        for _, node in selected
+    )
+    # Preserve existing mutation outputs and parameter/buffer lifts. The
+    # call-spec tree covers user outputs only, excluding mutation outputs.
+    root = exported.module_call_graph[0]
+    if root.fqn != "" or root.signature.out_spec is None:
+        raise AssertionError("Unexpected Stage1 exported call signature")
+    root.signature.out_spec = pytree.tree_flatten(
+        tuple(range(final_count + len(selected)))
+    )[1]
     gm.graph.lint()
     gm.recompile()
-    gm._out_spec = pytree.tree_flatten(
-        tuple(range(len(previous) + len(selected)))
-    )[1]
-    return gm, names, len(previous), missed
+    exported.validate()
+    return exported, names, final_count, missed
 
 
 def run(args):
@@ -132,6 +154,8 @@ def run(args):
         "unmatched_scopes": [],
         "first_divergence": None,
         "probe_only": args.probe_only,
+        "import_only": args.import_only,
+        "imported": False,
     }
     try:
         if args.checkpoint is None:
@@ -159,7 +183,7 @@ def run(args):
             if "source." + name in present
         )
         report["requested_scopes"] = list(active)
-        gm, names, final_count, missed = expose_stage1_boundaries(
+        probed, names, final_count, missed = expose_stage1_boundaries(
             exported, active
         )
         report["unmatched_scopes"] = missed
@@ -167,7 +191,7 @@ def run(args):
         if final_count != len(reference):
             raise AssertionError("Trained Stage1 source/export output arity changed")
         with torch.inference_mode():
-            expected = tuple(gm(*inputs))
+            expected = tuple(probed.module()(*inputs))
         if len(expected) != final_count + len(names):
             raise AssertionError("Probe graph output arity mismatch")
         for i, (t, ref) in enumerate(zip(expected[:final_count], reference)):
@@ -175,17 +199,6 @@ def run(args):
             np.testing.assert_allclose(
                 actual, ref, atol=2e-5, rtol=2e-5,
                 err_msg=f"Instrumented Stage1 source output {i} differs",
-            )
-        reexport = torch.export.export(gm, inputs, strict=True)
-        with torch.inference_mode():
-            cpu = tuple(reexport.module()(*inputs))
-        for name, a, b in zip(
-            [f"final_{i}" for i in range(final_count)] + names, expected, cpu
-        ):
-            np.testing.assert_allclose(
-                a.detach().numpy(), b.detach().numpy(),
-                atol=2e-5, rtol=2e-5,
-                err_msg=f"Stage1 diagnostic CPU re-export changed {name}",
             )
         print(
             f"[Stage1 differential] {len(names)} source scopes, "
@@ -195,9 +208,13 @@ def run(args):
         if args.probe_only:
             report["cpu_proof"] = True
             return 0
-        compiled = aot.export(reexport)
+        compiled = aot.export(probed)
         compiled.verify()
         compiled.save_mlir(args.output / "stage1_probes.mlir")
+        report["imported"] = True
+        if args.import_only:
+            print("[Stage1 differential] imported probed Stage1 to Torch-MLIR", flush=True)
+            return 0
         compiled.session.set_flags(f"--iree-vulkan-target={args.target}")
         compiled.session.set_flags("--iree-opt-level=O2")
         vmfb = args.output / "stage1_probes.vmfb"
@@ -286,7 +303,9 @@ def main():
     parser.add_argument("--frames", type=int, default=1)
     parser.add_argument("--height", type=int, default=64)
     parser.add_argument("--width", type=int, default=64)
-    parser.add_argument("--probe-only", action="store_true")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--probe-only", action="store_true")
+    modes.add_argument("--import-only", action="store_true")
     args = parser.parse_args()
     if args.checkpoint and not args.checkpoint.is_file():
         parser.error(f"Checkpoint not found: {args.checkpoint}")
