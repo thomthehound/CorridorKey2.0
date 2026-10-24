@@ -258,3 +258,23 @@ the diagnostic report is not evidence that the original executable is fixed.
 The `--probe-only` option checks probe capture and CPU re-export without an
 IREE/Vulkan compile. The CI fixture uses that mode to exercise the probe
 selection logic without downloading production weights.
+
+### Isolating the first trained full-spatial block
+
+If `input_pre_0` agrees and `input_pre_1` diverges, use the focused
+checkpoint diagnostic:
+
+```powershell
+python scripts/ci/diagnose_stage2_vulkan.py --checkpoint weights/corridorkey_v2.safetensors --height 64 --width 64 --target rdna1 --first-block --output build/checkpoint-stage2-block0
+```
+
+This probes the original block 0's RMSNorm, linear QKV, normalized Q/K,
+gated full-spatial attention, output projection, learned spatial
+depthwise value/gate convolutions (when enabled), and SwiGLU MLP.
+The first block in the ten-block production architecture does not
+enable the separate QKV depthwise convolution. Probes are original
+model tensor boundaries exported from the same graph; no independent
+network or replacement attention implementation is used. Inspect
+`report.json` and the saved CPU/Vulkan intermediate tensors to
+identify the first divergent operation. CPU probe mapping is exercised
+on the small source-derived fixture in both CI environments.

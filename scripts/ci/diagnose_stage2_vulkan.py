@@ -82,6 +82,59 @@ def trained_sites(stage2, rgb):
 
 
 
+def first_block_sites(stage2, rgb):
+    """Expose the operators inside the first trained full-spatial block.
+
+    Probe only unchanged FX graph tensors, without replacing any learned
+    operation. Module-path and tensor-shape matching is checked strictly.
+    """
+    block = stage2.pre_blocks[0]
+    from corridorkey.blocks import FullSpatialBlock2D
+    if not isinstance(block, FullSpatialBlock2D):
+        raise ValueError("Stage2 pre-block 0 is not FullSpatialBlock2D")
+    bt = rgb.shape[0] * rgb.shape[1]
+    height, width = rgb.shape[-2] // 16, rgb.shape[-1] // 16
+    width_channels = stage2.d
+    token_shape = (bt, height, width, width_channels)
+    tokens = height * width
+    heads = block.attn.num_heads
+    head_width = block.attn.head_dim
+    prefix = "pre_blocks.0"
+    sites = [
+        ("input_pre_0", f"input:{prefix}.norm1", token_shape),
+        ("pre0_norm1", f"{prefix}.norm1", token_shape),
+        ("pre0_qkv_linear", f"{prefix}.attn.qkv.qkv",
+         (bt, tokens, 3 * width_channels)),
+        ("pre0_q_norm", f"{prefix}.attn.q_norm",
+         (bt, heads, tokens, head_width)),
+        ("pre0_k_norm", f"{prefix}.attn.k_norm",
+         (bt, heads, tokens, head_width)),
+        ("pre0_attention_gate", f"{prefix}.attn.attn_gate",
+         (bt, heads, tokens, head_width)),
+        ("pre0_attention_proj", f"{prefix}.attn.proj",
+         (bt, tokens, width_channels)),
+        ("pre0_attention", f"{prefix}.attn",
+         (bt, 1, height, width, width_channels)),
+    ]
+    if block.local_mix is not None:
+        sites.extend([
+            ("pre0_local_norm", f"{prefix}.local_mix.norm", token_shape),
+            ("pre0_local_conv", f"{prefix}.local_mix",
+             (bt, 2 * width_channels, height, width)),
+            ("pre0_local_mix", f"{prefix}.local_mix", token_shape),
+        ])
+    sites.extend([
+        ("pre0_norm2", f"{prefix}.norm2", token_shape),
+        ("pre0_mlp_gate", f"{prefix}.mlp.w_gate",
+         (bt, height, width, block.mlp.hidden)),
+        ("pre0_mlp_up", f"{prefix}.mlp.w_up",
+         (bt, height, width, block.mlp.hidden)),
+        ("pre0_mlp", f"{prefix}.mlp", token_shape),
+        ("input_pre_1", "input:pre_blocks.1.norm1", token_shape),
+    ])
+    return tuple(sites)
+
+
 def _stack_paths(node):
     stack = node.meta.get("nn_module_stack") or {}
     return [
@@ -120,14 +173,15 @@ def expose_intermediates(exported, sites=SYNTHETIC_SITES):
             candidates.append(candidate)
         if not candidates:
             available = [
-                (node.name, tuple(node.meta["val"].shape), _stack_paths(node))
+                (node.name, tuple(node.meta["val"].shape),
+                 str(node.target), _stack_paths(node))
                 for node in gm.graph.nodes
                 if hasattr(node.meta.get("val"), "shape")
-                and _stack_paths(node)
+                and any(path.rsplit(".", 1)[0] in p for p in _stack_paths(node))
             ]
             raise RuntimeError(
                 f"No exported tensor at {name} ({path}, shape {shape}). "
-                f"Available sample: {available[:20]}"
+                f"Nearby graph nodes: {available[:30]}"
             )
         diagnostics.append((name, candidates[-1]))
 
@@ -145,13 +199,15 @@ def expose_intermediates(exported, sites=SYNTHETIC_SITES):
 
 
 def run(directory: Path, target: str, *, checkpoint=None,
-        height: int = 64, width: int = 64, probe_only: bool = False):
+        height: int = 64, width: int = 64, probe_only: bool = False,
+        first_block: bool = False):
     directory.mkdir(parents=True, exist_ok=True)
     report = {
         "scope": ("trained checkpoint Stage2" if checkpoint is not None
                   else "reduced source-derived Stage2"),
         "checkpoint": str(checkpoint) if checkpoint is not None else None,
         "target": target,
+        "first_block": first_block,
         "image_shape": [height, width] if checkpoint is not None else [32, 32],
         "samples": [],
         "stage": "start",
@@ -160,7 +216,8 @@ def run(directory: Path, target: str, *, checkpoint=None,
         if checkpoint is None:
             source, rgb, baton, reference = create_stage2()
             reference_output = (reference.transpose(0, 1, 3, 4, 2).copy(),)
-            sites = SYNTHETIC_SITES
+            sites = (first_block_sites(source.stage2, rgb)
+                     if first_block else SYNTHETIC_SITES)
         else:
             from prove_checkpoint_stage2 import load_checkpoint_stage2
             from prove_stage2_vulkan import ChannelLastStage2Result
@@ -183,7 +240,8 @@ def run(directory: Path, target: str, *, checkpoint=None,
                 for t in reference_output
             )
             source = ChannelLastStage2Result(stage2).eval()
-            sites = trained_sites(stage2, rgb)
+            sites = (first_block_sites(stage2, rgb)
+                     if first_block else trained_sites(stage2, rgb))
 
         report["sites"] = [name for name, _, _ in sites]
         exported, _ = export_stage2(source, rgb, baton)
@@ -330,6 +388,11 @@ def main():
         "--probe-only", action="store_true",
         help="Verify FX probe sites and CPU re-export without compiling",
     )
+    parser.add_argument(
+        "--first-block", action="store_true",
+        help="Probe the first full-spatial block's QKV, attention, local mix "
+             "and MLP instead of the full Stage2 block boundaries",
+    )
     args = parser.parse_args()
     if args.checkpoint is not None:
         if not args.checkpoint.is_file():
@@ -341,6 +404,7 @@ def main():
     return run(
         args.output, args.target, checkpoint=args.checkpoint,
         height=args.height, width=args.width, probe_only=args.probe_only,
+        first_block=args.first_block,
     )
 
 

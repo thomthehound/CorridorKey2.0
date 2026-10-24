@@ -125,6 +125,7 @@ jobs:
         shell: bash
         run: |
           python scripts/ci/diagnose_stage2_vulkan.py --output build/stage2-probe-check --probe-only
+          python scripts/ci/diagnose_stage2_vulkan.py --output build/stage2-block0-probe --probe-only --first-block
 
       - name: Diagnose Stage2 numerical mismatch
         if: failure() && runner.os == 'Linux'
