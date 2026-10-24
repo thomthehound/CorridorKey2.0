@@ -84,6 +84,13 @@ def cases():
                                 shift=(2, 2)),
             (1, 7, 9, 16),
         ),
+        # Trained Stage2 may have only a 4x4 token grid with 16x16 windows.
+        # Cover extreme padding and source-group/dense-mask correspondence.
+        "swin2d-shift-large-window": (
+            lambda: SwinBlock2D(dim=16, num_heads=2, window_size=16,
+                                shift=(8, 8)),
+            (1, 4, 4, 16),
+        ),
         "swin2d-shift-batched": (
             lambda: SwinBlock2D(dim=16, num_heads=2, window_size=4,
                                 shift=(2, 0)),
@@ -182,6 +189,36 @@ class GeometryMaskSwin2DAttention(torch.nn.Module):
             raise ValueError("Shifted block requires a nonempty region mask")
         if not mask.any(dim=-1).all():
             raise ValueError("Shifted mask has a fully masked query")
+        # Prove that every real query sees precisely the grouped source keys.
+        # Padded queries are cropped after inverse shift and have no output
+        # contract; their mask rows simply need at least one finite key.
+        from corridorkey.blocks import (
+            _shifted_region_groups_2d_cached, _shifted_region_ids_2d,
+        )
+
+        geometry = (
+            height, width, padded_height, padded_width,
+            window_size, shift[0], shift[1],
+        )
+        num_windows, full_windows, groups = (
+            _shifted_region_groups_2d_cached(*geometry)
+        )
+        if num_windows != mask.shape[0]:
+            raise AssertionError("Shifted attention window inventory differs")
+        grouped = torch.zeros_like(mask)
+        for win in full_windows:
+            grouped[win].fill_(True)
+        for tokens, windows in groups:
+            token_idx = torch.tensor(tokens, dtype=torch.long)
+            for win in windows:
+                grouped[win][token_idx[:, None], token_idx[None, :]] = True
+        real_queries = _shifted_region_ids_2d(
+            *geometry, torch.device("cpu")
+        ) >= 0
+        if not torch.equal(mask & real_queries.unsqueeze(-1), grouped):
+            raise AssertionError(
+                "Dense shifted-window mask changes source attention groups"
+            )
         self.register_buffer("allowed", mask, persistent=False)
 
     def forward(self, x, attn_mask=None, region_groups=None, region_ids=None):

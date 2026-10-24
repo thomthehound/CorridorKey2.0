@@ -201,13 +201,12 @@ Still required separately: actual checkpoint Stage 1 configuration and tensor lo
 
 ## Local AMD importer environment (Windows and Linux)
 
-Keep the conversion/reference environment separate from the original CUDA
-application environment. Python 3.12 matches the Vulkan proof CI and its
-pinned NumPy 1.x dependencies:
+Use an existing Conda environment for checkpoint validation, or create an
+isolated one if desired. The installer resolves compatible packages without
+requiring Python 3.12 or exact local package versions. The reproducible CI
+profile uses separately pinned versions.
 
 ```powershell
-conda create -n corridorkey-amd python=3.12 -y
-conda activate corridorkey-amd
 python scripts/setup_amd_importer.py --profile checkpoint
 python scripts/download_weights.py --stage2_checkpoint_only
 python scripts/ci/prove_checkpoint_stage2.py weights/corridorkey_v2.safetensors --height 64 --width 64
@@ -226,4 +225,12 @@ perform numerical device/reference comparisons. The checkpoint profile does
 not import or require IREE; neither profile installs a CUDA or ROCm build of
 PyTorch. The setup script supports `--dry-run` to inspect the commands.
 These are host-side model import/reference dependencies, not requirements for
-the eventual native inference runtime.
+the eventual native inference runtime. If a dependency combination fails,
+record the versions and the failing operation before constraining local
+environments.
+
+The Stage2 exporter proves the dense shifted-window mask's real-query
+attention membership against the source's grouped-window representation.
+Because dense and grouped SDPA use different matrix/reduction shapes,
+a source-to-legalized FP32 comparison uses 1e-5 absolute/relative tolerance;
+the independent source-to-export and Vulkan checks remain separately enforced.
