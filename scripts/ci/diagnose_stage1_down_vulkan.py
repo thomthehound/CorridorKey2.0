@@ -25,7 +25,7 @@ class DownsampleVariant(torch.nn.Module):
     def __init__(self, conv: torch.nn.Conv2d, mode: str):
         super().__init__()
         if mode not in ("native", "im2col", "crop4", "gemm4", "gemm4runtime",
-                         "seg128", "spatial", "unfold"):
+                         "seg128", "seg128general", "spatial", "unfold"):
             raise ValueError(f"Unknown convolution variant: {mode}")
         if mode in ("crop4", "gemm4", "gemm4runtime", "seg128"):
             # This exact reduction holds only for one output cell: at 4x4
@@ -36,10 +36,16 @@ class DownsampleVariant(torch.nn.Module):
         if mode in ("crop4", "gemm4", "gemm4runtime", "seg128",
                     "spatial", "unfold") and conv.groups != 1:
             raise ValueError("Matmul variants require groups=1")
-        self.conv = conv
+        if mode == "seg128general":
+            from stage1_down_lowering import SegmentedStage1DownConv
+            self.conv = SegmentedStage1DownConv(conv)
+        else:
+            self.conv = conv
         self.mode = mode
 
     def forward(self, x, runtime_weight=None, runtime_bias=None):
+        if self.mode == "seg128general":
+            return self.conv(x)
         if self.mode in ("native", "im2col"):
             return self.conv(x)
         conv = self.conv
@@ -151,7 +157,8 @@ def self_test_spatial():
         with torch.inference_mode():
             expected = conv(x).numpy()
         modes = (
-            "spatial", "crop4", "gemm4", "gemm4runtime", "seg128"
+            "spatial", "crop4", "gemm4", "gemm4runtime", "seg128",
+            "seg128general"
         ) if (height, width) == (4, 4) else ("spatial",)
         for mode in modes:
             variant = DownsampleVariant(conv, mode).eval()
@@ -401,9 +408,9 @@ def main():
     parser.add_argument("--frames", type=int, default=1)
     parser.add_argument("--target", default="rdna3")
     parser.add_argument(
-        "--modes", default="native,gemm4,gemm4runtime,seg128",
+        "--modes", default="native,gemm4,gemm4runtime,seg128,seg128general",
         help="Comma-separated variants: native,im2col,crop4,gemm4,"
-             "gemm4runtime,seg128,spatial,unfold",
+             "gemm4runtime,seg128,seg128general,spatial,unfold",
     )
     parser.add_argument("--output", type=Path, required=True)
     group = parser.add_mutually_exclusive_group()
@@ -416,7 +423,7 @@ def main():
     args.modes = tuple(part.strip() for part in args.modes.split(","))
     if not args.modes or any(
         part not in ("native", "im2col", "crop4", "gemm4", "gemm4runtime",
-                     "seg128", "spatial", "unfold")
+                     "seg128", "seg128general", "spatial", "unfold")
         for part in args.modes
     ) or len(set(args.modes)) != len(args.modes):
         parser.error(
