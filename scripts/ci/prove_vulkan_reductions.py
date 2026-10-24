@@ -288,6 +288,25 @@ def inspect_existing_dumps(output: Path) -> int:
     ))
 
 
+def reduction_case_passes(case, *, executed, one_hot_requested):
+    """Require numerical and per-channel correctness for an executed probe."""
+    if "error" in case or not case.get("compile"):
+        return False
+    if executed and case.get("numerical_match") is not True:
+        return False
+    if one_hot_requested and case.get("operation") in (
+        "sum_square", "mean_square"
+    ):
+        evidence = case.get("one_hot") or {}
+        width = case["width"]
+        return (
+            evidence.get("count") == width
+            and evidence.get("roughly_once") == width
+            and evidence.get("roughly_twice") == 0
+        )
+    return True
+
+
 def run(args):
     if args.inspect_only:
         return inspect_existing_dumps(args.output)
@@ -472,7 +491,10 @@ def run(args):
             json.dumps(report, indent=2) + "\n", encoding="utf-8"
         )
     return int(any(
-        "error" in case or case["numerical_match"] is False
+        not reduction_case_passes(
+            case, executed=args.execute_vulkan,
+            one_hot_requested=args.one_hot,
+        )
         for case in report["cases"]
     ))
 
