@@ -1,5 +1,26 @@
 # AMD-native inference architecture
 
+## Validated native Vulkan milestone (2026-10-24)
+
+The trained Stage1 (512 learned tensors) and Stage2 (226 learned tensors)
+now independently match the original source on the Radeon 8060S. A
+compiled, PyTorch-free Stage1→Stage2 runtime replay also passes
+reference comparisons with the **native, unsegmented** reductions.
+Ten isolated native reduction tests across widths 128/192/256/512/1280
+pass with zero mismatches and one-hot contributions counted once.
+
+The compiled two-stage replay measured **79.229 ms median wall-clock**
+including explicit baton readback, CPU NHWC→NCHW layout conversion and
+reupload. This is a correctness/execution baseline, not GPU kernel latency
+or production throughput. Frozen foundation inference, original video
+and temporal scheduling, native C++23 integration and GPU-resident
+interstage transfers remain unfinished.
+
+The reduction correction and hardware acceptance are recorded in
+[`iree-3.13-wave32-fix.md`](iree-3.13-wave32-fix.md);
+earlier failure investigations below remain historical diagnostics,
+not the current acceptance status.
+
 ## Objective
 
 Execute CorridorKey's original learned models and checkpoints natively on AMD GPUs under Vulkan, preserving full-resolution foreground/alpha output, HDR color and temporal semantics, and without requiring CUDA, ROCm/HIP, ONNX, or PyTorch in the deployed runtime. The import/compiler architecture must accept subsequent CorridorKey model releases without manual reimplementation of their networks.
