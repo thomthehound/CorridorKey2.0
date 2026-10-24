@@ -1,8 +1,29 @@
 # AMD Vulkan wide-accumulation correctness investigation
 
-**Status:** Reproduced on physical AMD Vulkan; underlying compiler/driver/runtime fault not yet attributed. A replacement AMD Vulkan driver reproduced the same Stage1 failure and segmented success on October 24, 2026 (replacement version not yet recorded). Segmented source-equivalent lowerings are correctness candidates, not root-cause fixes.
+**Status:** Native wide-reduction defect source-localized and corrected in the tested compiler, with physical Radeon correctness verified. Historical pre-correction diagnostics follow. A replacement AMD Vulkan driver reproduced the same Stage1 failure and segmented success on October 24, 2026 (replacement version not yet recorded). Segmented source-equivalent lowerings are correctness candidates, not root-cause fixes.
 
 **Scope:** CorridorKey 2.0 Stage2 RMSNorm reductions and Stage1 trained downsample convolution/GEMM, imported with Torch Export / IREE Turbine and compiled through IREE's Vulkan SPIR-V backend. The exported computation retains checkpoint parameters and source arithmetic. DXC is not part of this direct SPIR-V compilation path.
+
+## Confirmed resolution of the native reduction reproducer (2026-10-24)
+
+The two `SubgroupReduce` translation paths omitted the subgroup width
+selected during compiler configuration. On a Vulkan device whose default
+subgroup size was 64 but whose reduction lowering assumed 32, this could
+duplicate channel contributions. The versioned compiler correction
+propagates the requested width; the existing Vulkan runtime respects it.
+
+On Radeon 8060S, ten native sum/mean-square cases at widths
+128/192/256/512/1280 now pass with zero mismatches, and every one-hot
+channel contributes exactly once. Original checkpoint-backed Stage1 and
+Stage2 pass independently, and combined native replay passed at 79.229 ms
+median including the CPU staging bridge. Earlier numerical failures
+below describe the *pre-correction* behavior. Some historical GEMM
+diagnostics had the same symptom; do not assume every operator used the
+same exact reduction lowering without independent evidence.
+
+Broader device/driver coverage and GPU-resident interstage transfer
+remain engineering work, not blockers to the validated two-stage
+correctness milestone.
 
 ## Environment and reproduction controls
 
@@ -231,7 +252,7 @@ again cannot explain away the failure: investigate IREE reduction lowering
 or nonconforming driver execution. If **64**, reconcile the codegen
 subgroup and pipeline request without applying an output scaling patch.
 
-## Root-cause hypotheses (unresolved)
+## Historical root-cause hypotheses (pre-correction)
 
 1. **IREE lowering/tiling of wide reductions or matmuls.** The repeated 2× accumulation with both convolution and independent GEMM is consistent with duplicate contribution, lane/subgroup reuse, or a malformed reduction tree. These are hypotheses, not observations of generated machine code.
 2. **AMD Vulkan driver SPIR-V compilation.** A driver/compiler fault could mishandle otherwise valid wide accumulations; the forthcoming same-graph cross-driver comparison is necessary.
