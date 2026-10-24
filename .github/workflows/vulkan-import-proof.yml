@@ -158,6 +158,11 @@ jobs:
             python scripts/ci/prove_vulkan_reductions.py --widths 128,256,1280 --operations sum_square,mean_square,split128_sum_square,split128_mean_square --target rdna1 --output build/reduction-sweep
           fi
 
+      - name: Verify Stage1 source differential probe selection
+        shell: bash
+        run: |
+          python scripts/ci/diagnose_stage1_vulkan.py --probe-only --output build/stage1-probe-check --target rdna1 --rms-reduction segmented128
+
       - name: Verify Stage2 diagnostic probe selection
         shell: bash
         run: |
@@ -181,6 +186,7 @@ jobs:
             build/stage2-segmented/
             build/stage2-diagnostic/
             build/stage1-proof/
+            build/stage1-probe-check/
             build/rmsnorm-proof/
             build/reduction-sweep/
           if-no-files-found: warn
