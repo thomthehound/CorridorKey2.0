@@ -44,6 +44,7 @@ def run(args):
         "scope": "real trained Stage1+Stage2, normalized foundation features",
         "gpu_target": args.target,
         "rms_reduction": "segmented128",
+        "down_reduction": args.down_reduction,
         "foundation_networks_executed": False,
         "native_cpp_runtime": False,
         "stage1": False,
@@ -57,6 +58,7 @@ def run(args):
                 args.checkpoint, "--frames", "1",
                 "--height", args.height, "--width", args.width,
                 "--target", args.target, "--rms-reduction", "segmented128",
+                "--down-reduction", args.down_reduction,
                 "--compile", "--execute-vulkan", "--output", stage1_dir,
             ])
         except subprocess.CalledProcessError:
@@ -72,6 +74,7 @@ def run(args):
                     "--height", str(args.height), "--width", str(args.width),
                     "--target", str(args.target),
                     "--rms-reduction", "segmented128",
+                    "--down-reduction", args.down_reduction,
                     "--output", str(diagnostic_dir),
                 ]
                 print(
@@ -155,6 +158,8 @@ def main():
     parser.add_argument("--height", type=int, default=64)
     parser.add_argument("--width", type=int, default=64)
     parser.add_argument("--target", default="rdna3")
+    parser.add_argument("--down-reduction", choices=("native", "segmented128"),
+                        default="native")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument(
