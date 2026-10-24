@@ -150,6 +150,7 @@ def run(args):
         "checkpoint": str(args.checkpoint) if args.checkpoint else None,
         "target": args.target,
         "rms_reduction": args.rms_reduction,
+        "down_reduction": args.down_reduction,
         "probes": [],
         "unmatched_scopes": [],
         "first_divergence": None,
@@ -175,7 +176,8 @@ def run(args):
             report["feature_dimensions"] = dims
 
         exported, _ = export_stage1(
-            model, inputs, rms_reduction=args.rms_reduction
+            model, inputs, rms_reduction=args.rms_reduction,
+            down_reduction=args.down_reduction,
         )
         present = {name for name, _ in model.named_modules()}
         active = tuple(
@@ -300,6 +302,8 @@ def main():
     parser.add_argument("--target", default="rdna3")
     parser.add_argument("--rms-reduction", choices=("native", "segmented128"),
                         default="segmented128")
+    parser.add_argument("--down-reduction", choices=("native", "segmented128"),
+                        default="native")
     parser.add_argument("--frames", type=int, default=1)
     parser.add_argument("--height", type=int, default=64)
     parser.add_argument("--width", type=int, default=64)
