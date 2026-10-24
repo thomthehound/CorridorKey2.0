@@ -67,6 +67,7 @@ jobs:
       - name: Verify trained two-stage IREE runtime entry points
         shell: bash
         run: |
+          python scripts/ci/test_pipeline_diagnostics.py
           python scripts/ci/prove_trained_pipeline.py --help
           python scripts/ci/execute_compiled_stages.py --help
 
