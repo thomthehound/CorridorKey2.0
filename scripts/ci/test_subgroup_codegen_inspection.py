@@ -10,10 +10,31 @@ from pathlib import Path
 
 from prove_vulkan_reductions import (
     collect_executable_subgroup_metadata, inspect_existing_dumps,
+    reduction_case_passes,
 )
 
 
 def main():
+    # A correct random input must not conceal incorrect lane multiplicity.
+    case = {
+        "operation": "sum_square", "width": 192, "compile": True,
+        "numerical_match": True,
+        "one_hot": {"count": 192, "roughly_once": 192, "roughly_twice": 0},
+    }
+    assert reduction_case_passes(case, executed=True, one_hot_requested=True)
+    case["one_hot"]["roughly_once"] = 64
+    case["one_hot"]["roughly_twice"] = 128
+    assert not reduction_case_passes(case, executed=True, one_hot_requested=True)
+    case["one_hot"] = {"count": 192, "roughly_once": 192, "roughly_twice": 0}
+    case["numerical_match"] = False
+    assert not reduction_case_passes(case, executed=True, one_hot_requested=True)
+    case["numerical_match"] = True
+    del case["one_hot"]
+    assert not reduction_case_passes(case, executed=True, one_hot_requested=True)
+    assert reduction_case_passes(case, executed=True, one_hot_requested=False)
+    assert not reduction_case_passes(
+        {**case, "compile": False}, executed=False, one_hot_requested=False
+    )
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         files = root / "sum_square_256_executables"
