@@ -312,6 +312,25 @@ def run(args):
                 )
                 for index, value in enumerate(gpu_values):
                     np.save(args.output / f"vulkan_{index}.npy", value)
+                report["vulkan_error_stats"] = [
+                    {
+                        "output": index,
+                        "max_absolute_error": float(
+                            np.max(np.abs(value - reference))
+                        ),
+                        "mean_absolute_error": float(
+                            np.mean(np.abs(value - reference))
+                        ),
+                        "mismatched": int(np.count_nonzero(
+                            ~np.isclose(
+                                value, reference, atol=3e-3, rtol=3e-3
+                            )
+                        )),
+                    }
+                    for index, (value, reference) in enumerate(
+                        zip(gpu_values, source)
+                    )
+                ]
                 report["vulkan_errors"] = _compare(
                     gpu_values, source, "Vulkan Stage1",
                     atol=3e-3, rtol=3e-3,
