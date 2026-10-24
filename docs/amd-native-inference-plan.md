@@ -424,3 +424,52 @@ checked. If the real model passes, benchmark the native and segmented
 kernels and pursue an upstream compiler reduction fix rather than
 permanently making this model-specific. Keep final acceptance attached
 to an actual trained checkpoint executing on physical AMD hardware.
+
+## Trained Stage1 to Stage2 executable pipeline
+
+The original trained Stage2 proof has passed on Radeon 8060S using the
+`segmented128` RMSNorm lowering. The next independently compiled model
+partition is the **original checkpoint's Stage1**. It is now constructed
+from the source `CorridorKeyV3` Stage1 parameters, using checkpoint
+metadata and the width of its trained fusion weights to resolve the
+C-RADIO feature interface without constructing external foundation
+models. It strictly loads every Stage1 tensor and refuses missing or
+unexpected state. Synthetic feature boundary tensors have the correct
+source shapes and ordering; they are deliberately **not** described as
+MoGe/C-RADIO/RVM output.
+
+For trained Stage1, the exporter reuses source temporal attention, hint
+conditioning, both trained output heads, and the exact graph capture,
+with the source-equivalent segmented RMSNorm decomposition. The original
+source output, exported CPU graph, and compiled Vulkan output are
+compared independently.
+
+A single command chains real-checkpoint Stage1 loading/export/Vulkan
+proof, real-checkpoint Stage2 compilation with the **actual source
+Stage1 baton as input**, then executes their compiled VMFBs in a separate
+host that imports **NumPy and IREE runtime but not PyTorch**:
+
+```powershell
+python scripts/ci/prove_trained_pipeline.py weights/corridorkey_v2.safetensors --height 64 --width 64 --target rdna3 --output build/trained-two-stage
+```
+
+Individual artifacts are stored under `stage1/`, `stage2/`, and
+`execution/`. The IREE-only host reads Stage1's channel-last baton
+back to host, transposes it to Stage2's channel-first input ABI, and
+reuploads it. This **explicit staging boundary** is neither zero-copy
+nor a production scheduling implementation: reports separately disclose
+transfer bytes and end-to-end wall-clock latency including copies and
+synchronization. It gives the real trained subgraph an executable
+non-PyTorch deployment boundary that can later be moved to the required
+native C++23 host with device-resident buffer sharing.
+
+Passing this proof will establish two trained connected neural stages,
+but **not** the complete video matting pipeline: external foundation
+models, precomputed feature normalization from foundation statistics,
+overlapping temporal Hann windows, recurrent carry, native HDR/color
+handling, and video scheduling still require their own original-model
+imports and integration. CI can validate the strict trained Stage1
+loader against a small generated checkpoint and exercise source-derived
+fixtures; hosted runners do not contain the official model weights or
+a physical Radeon 8060S. Do not conflate those CI checks with physical
+GPU execution of trained Stage1.

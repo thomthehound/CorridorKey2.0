@@ -64,6 +64,12 @@ jobs:
         shell: bash
         run: python scripts/ci/prove_checkpoint_stage1.py --self-test
 
+      - name: Verify trained two-stage IREE runtime entry points
+        shell: bash
+        run: |
+          python scripts/ci/prove_trained_pipeline.py --help
+          python scripts/ci/execute_compiled_stages.py --help
+
       - name: Install software Vulkan device (Linux)
         if: runner.os == 'Linux'
         shell: bash
