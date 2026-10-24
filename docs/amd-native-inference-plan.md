@@ -494,3 +494,31 @@ control, not an upstream fix. The generalized segmented Stage1 export and
 connected two-stage Vulkan proof still require physical-hardware validation.
 Retain the failing native variants as reproducible baselines, along with driver,
 compiler, target, IR/SPIR-V, and performance metadata.
+
+## Unified trained Vulkan pipeline diagnostics
+
+`scripts/ci/prove_trained_pipeline.py` always writes
+`<output>/corridorkey-vulkan-diagnostics.json` in its finalization path,
+including when checkpoint-backed Stage1 or Stage2 GPU comparison fails.
+This **single shareable JSON** includes the complete available pipeline,
+Stage1, Stage1 differential, Stage2, and connected execution reports under
+distinct named keys, plus an ordered probe summary and the first divergent
+boundary. Individual `report.json` files remain available under their
+respective subdirectories for automated tools and local troubleshooting.
+Absent stages are represented as absent reports, not as successful executions.
+Old stage reports are cleared when a fresh pipeline run begins to prevent
+reusing stale results from a previous attempt in the same output directory.
+
+To consolidate an existing run without rerunning any checkpoint compilation
+or Vulkan execution:
+
+```powershell
+python scripts/ci/collect_pipeline_diagnostics.py --output build/trained-two-stage-fuse
+```
+
+Share only the resulting
+`build/trained-two-stage-fuse/corridorkey-vulkan-diagnostics.json`.
+For backend analysis requiring full tensor values or compiled SPIR-V, retain
+the per-stage `.npy`, MLIR and VMFB artifacts locally; the summary JSON
+intentionally does not duplicate these potentially large binaries.
+
