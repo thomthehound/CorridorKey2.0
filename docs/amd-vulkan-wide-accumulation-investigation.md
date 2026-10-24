@@ -50,6 +50,27 @@ python scripts/ci/diagnose_stage1_down_vulkan.py `
 
 Use a distinct `--output` directory for each driver. The script stores GPU and CPU `.npy` values and a `report.json` with fitted accumulation scaling and bias-aware residual statistics. A nonzero exit is expected when intentionally retaining the failing unsegmented control variants.
 
+## Integration after fixing the first Stage1 boundary
+
+In the subsequent **full trained Stage1** run with
+`--down-reduction segmented128`, the downsample probe matched GPU/CPU
+(maximum absolute error `7.51e-6`, 0/512 mismatches), and the following
+`fuse.norm` also matched (`4.77e-6`, 0/2816 mismatches). The next
+divergence moved to `fuse` (maximum error `3.1314`, 1531/1536
+mismatches), and the complete baton remained incorrect. This confirms the
+corrected downsample in the original trained graph and independently exposes
+a second wide arithmetic boundary.
+
+The original `FusionLinSwiglu` source contains four learned `nn.Linear`
+operations: `linear_shortcut`, `w_gate`, `w_up`, and `w_down`. An
+opt-in `--fuse-reduction segmented128` now changes only their export-time
+dot-product grouping; the original modules and exact parameters are restored
+after capture. Diagnostic probes expose each of those source projections
+rather than treating `fuse` as an opaque block. Source-parity and
+cross-platform import checks are mandatory. **No physical-device success for
+this new fusion lowering has yet been demonstrated.** The original native
+linear operators remain available for continued backend investigation.
+
 ## Root-cause hypotheses (unresolved)
 
 1. **IREE lowering/tiling of wide reductions or matmuls.** The repeated 2× accumulation with both convolution and independent GEMM is consistent with duplicate contribution, lane/subgroup reuse, or a malformed reduction tree. These are hypotheses, not observations of generated machine code.
