@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""Differential Vulkan proof for the checkpoint's original Stage1 /16->/64 convolution.
+
+Runs the trained convolution with its actual source encoder activation. Compares
+native Conv2d with an equivalent unfold+matrix-multiply expression, without
+modifying checkpoint parameters or source-model inference.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import traceback
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+
+class DownsampleVariant(torch.nn.Module):
+    def __init__(self, conv: torch.nn.Conv2d, mode: str):
+        super().__init__()
+        if mode not in ("native", "unfold"):
+            raise ValueError(f"Unknown convolution variant: {mode}")
+        if mode == "unfold" and conv.groups != 1:
+            raise ValueError("Unfold variant requires a non-grouped convolution")
+        self.conv = conv
+        self.mode = mode
+
+    def forward(self, x):
+        if self.mode == "native":
+            return self.conv(x)
+        conv = self.conv
+        patches = F.unfold(
+            x, kernel_size=conv.kernel_size, dilation=conv.dilation,
+            padding=conv.padding, stride=conv.stride,
+        )
+        # Original convolution weights and spatial sampling order.
+        values = torch.matmul(
+            patches.transpose(1, 2), conv.weight.flatten(1).transpose(0, 1)
+        )
+        if conv.bias is not None:
+            values = values + conv.bias
+        height = (
+            x.shape[-2] + 2 * conv.padding[0]
+            - conv.dilation[0] * (conv.kernel_size[0] - 1) - 1
+        ) // conv.stride[0] + 1
+        width = (
+            x.shape[-1] + 2 * conv.padding[1]
+            - conv.dilation[1] * (conv.kernel_size[1] - 1) - 1
+        ) // conv.stride[1] + 1
+        return values.transpose(1, 2).reshape(
+            x.shape[0], conv.out_channels, height, width
+        )
+
+
+def make_fixture():
+    torch.manual_seed(20261024)
+    conv = torch.nn.Conv2d(8, 8, kernel_size=8, stride=4, padding=2).eval()
+    return conv, torch.randn(1, 8, 4, 4)
+
+
+def load_trained_downsample(checkpoint, height, width, frames):
+    from prove_checkpoint_stage1 import (
+        load_checkpoint_stage1, make_inputs, reference_outputs,
+    )
+
+    stage1, config, _, dims, count = load_checkpoint_stage1(checkpoint)
+    inputs = make_inputs(config, dims, frames, height, width)
+    captured = []
+
+    def capture_input(_module, args):
+        captured.append(args[0].detach().clone())
+
+    handle = stage1.down.conv.register_forward_pre_hook(capture_input)
+    try:
+        reference_outputs(stage1, inputs)
+    finally:
+        handle.remove()
+    if len(captured) != 1:
+        raise AssertionError(
+            f"Expected exactly one Stage1 down convolution, got {len(captured)}"
+        )
+    return stage1.down.conv, captured[0], count
+
+
+def stats(actual, expected):
+    if actual.shape != expected.shape or not np.isfinite(actual).all():
+        raise AssertionError("Downsample result has incorrect shape or nonfinite values")
+    delta = np.abs(actual - expected)
+    return {
+        "max_absolute_error": float(delta.max()),
+        "mean_absolute_error": float(delta.mean()),
+        "mismatched": int(np.count_nonzero(
+            ~np.isclose(actual, expected, atol=3e-3, rtol=3e-3)
+        )),
+        "total": int(expected.size),
+    }
+
+
+def run(args):
+    args.output.mkdir(parents=True, exist_ok=True)
+    report = {
+        "checkpoint": str(args.checkpoint) if args.checkpoint else None,
+        "target": args.target,
+        "height": args.height, "width": args.width, "frames": args.frames,
+        "modes": args.modes, "variants": {},
+    }
+    try:
+        if args.checkpoint:
+            conv, activation, count = load_trained_downsample(
+                args.checkpoint, args.height, args.width, args.frames
+            )
+            report["source"] = "trained Stage1 convolution and encoder activation"
+            report["trained_tensors"] = count
+        else:
+            conv, activation = make_fixture()
+            report["source"] = "deterministic synthetic convolution fixture"
+        conv.eval()
+        with torch.inference_mode():
+            reference = conv(activation).detach().numpy().copy()
+        np.save(args.output / "down_input_cpu.npy", activation.numpy())
+        np.save(args.output / "down_output_cpu.npy", reference)
+        report["input_shape"] = list(activation.shape)
+        report["output_shape"] = list(reference.shape)
+        report["weight_shape"] = list(conv.weight.shape)
+        print(
+            f"[Stage1 down] input={tuple(activation.shape)} "
+            f"weights={tuple(conv.weight.shape)} "
+            f"output={tuple(reference.shape)}", flush=True,
+        )
+
+        for mode in args.modes:
+            entry = report["variants"][mode] = {}
+            try:
+                variant = DownsampleVariant(conv, mode).eval()
+                with torch.inference_mode():
+                    direct = variant(activation).detach().numpy().copy()
+                entry["cpu"] = stats(direct, reference)
+                np.testing.assert_allclose(
+                    direct, reference, atol=2e-5, rtol=2e-5,
+                    err_msg=f"{mode} changed source convolution on CPU",
+                )
+                exported = torch.export.export(variant, (activation,), strict=True)
+                with torch.inference_mode():
+                    exported_cpu = exported.module()(activation).detach().numpy()
+                np.testing.assert_allclose(
+                    exported_cpu, reference, atol=2e-5, rtol=2e-5,
+                    err_msg=f"{mode} changed source convolution during export",
+                )
+                entry["cpu_export_passed"] = True
+                print(f"[Stage1 down] {mode} CPU/export passed", flush=True)
+                if args.probe_only:
+                    continue
+
+                import iree.turbine.aot as aot
+
+                compiled = aot.export(exported)
+                compiled.verify()
+                compiled.save_mlir(args.output / f"{mode}.mlir")
+                entry["imported"] = True
+                print(f"[Stage1 down] {mode} Torch-MLIR import passed", flush=True)
+                if args.import_only:
+                    continue
+                compiled.session.set_flags(f"--iree-vulkan-target={args.target}")
+                compiled.session.set_flags("--iree-opt-level=O2")
+                vmfb = args.output / f"{mode}.vmfb"
+                compiled.compile(save_to=vmfb, target_backends=["vulkan-spirv"])
+                entry["compiled"] = True
+                print(f"[Stage1 down] {mode} Vulkan compiled", flush=True)
+
+                import iree.runtime as rt
+                from prove_iree_vulkan import _read_device_result
+
+                config = rt.Config("vulkan")
+                module = rt.VmModule.copy_buffer(
+                    config.vm_instance, vmfb.read_bytes()
+                )
+                program = rt.load_vm_module(module, config)
+                result = program.main(
+                    rt.asdevicearray(config.device, activation.numpy())
+                )
+                if isinstance(result, (tuple, list)):
+                    if len(result) != 1:
+                        raise AssertionError("Expected one downsample result")
+                    result = result[0]
+                actual = _read_device_result(config, result)
+                np.save(args.output / f"{mode}_vulkan.npy", actual)
+                entry["vulkan"] = stats(actual, reference)
+                entry["vulkan_passed"] = entry["vulkan"]["mismatched"] == 0
+                print(
+                    f"[Stage1 down] {mode} Vulkan: "
+                    f"max={entry['vulkan']['max_absolute_error']:.8g}, "
+                    f"mismatched={entry['vulkan']['mismatched']}/"
+                    f"{entry['vulkan']['total']}", flush=True,
+                )
+            except Exception as exc:
+                entry["error"] = f"{type(exc).__name__}: {exc}"
+                entry["traceback"] = traceback.format_exc()
+                print(entry["traceback"], file=sys.stderr, flush=True)
+        return int(any(
+            "error" in variant or (
+                not args.probe_only and not args.import_only
+                and not variant.get("vulkan_passed", False)
+            )
+            for variant in report["variants"].values()
+        ))
+    except Exception as exc:
+        report["error"] = f"{type(exc).__name__}: {exc}"
+        report["traceback"] = traceback.format_exc()
+        print(report["traceback"], file=sys.stderr, flush=True)
+        return 1
+    finally:
+        (args.output / "report.json").write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--height", type=int, default=64)
+    parser.add_argument("--width", type=int, default=64)
+    parser.add_argument("--frames", type=int, default=1)
+    parser.add_argument("--target", default="rdna3")
+    parser.add_argument(
+        "--modes", default="native,unfold",
+        help="Comma-separated variants: native,unfold",
+    )
+    parser.add_argument("--output", type=Path, required=True)
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--probe-only", action="store_true")
+    group.add_argument("--import-only", action="store_true")
+    args = parser.parse_args()
+    args.modes = tuple(part.strip() for part in args.modes.split(","))
+    if not args.modes or any(
+        part not in ("native", "unfold") for part in args.modes
+    ) or len(set(args.modes)) != len(args.modes):
+        parser.error("--modes must select unique members of native,unfold")
+    if args.checkpoint and not args.checkpoint.is_file():
+        parser.error(f"Checkpoint not found: {args.checkpoint}")
+    if args.frames < 1 or args.height < 1 or args.width < 1 or (
+        args.height % 64 or args.width % 64
+    ):
+        parser.error("Height and width must be positive multiples of 64")
+    return run(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
