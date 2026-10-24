@@ -83,7 +83,7 @@ print("[trained wave32] Runtime version:", runtime, flush=True)
 
     $modes = if ($Mode -eq "Auto") { @("Native", "Segmented") } else { @($Mode) }
     foreach ($pass in $modes) {
-        $candidate = Join-Path $OutputRoot $pass.ToLowerInvariant()
+        $candidate = Join-Path $OutputRoot ($pass.ToLowerInvariant())
         $out = $candidate
         $index = 2
         while ((Test-Path -LiteralPath $out) -and
