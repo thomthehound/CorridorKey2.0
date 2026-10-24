@@ -172,3 +172,70 @@ pipeline creation must fail rather than silently execute a different
 configuration. The original segmented-source paths remain independent
 correctness controls until both Stage1 and Stage2 pass with the patched
 native compiler.
+
+## Using the patched compiler for trained Stage1 and Stage2
+
+Once `build_and_prove_iree_wave32.ps1` has produced the patched compiler,
+the trained proof **does not rebuild IREE, LLVM, or MLIR**:
+
+```powershell
+.\scripts\ci\run_trained_with_patched_iree.ps1
+```
+
+The default `Auto` mode compiles and proves the original checkpoint's
+Stage1→Stage2 computation with **all four reduction choices set to
+`native`**: RMS, downsample, fusion and the remaining wide linears.
+Unlike the original trained proof's `segmented128` RMS default, this
+makes it possible to determine whether the patched IREE compiler fixes
+native RMS reductions too. If native verification fails, the command
+preserves its consolidated diagnostics and runs a *second, separate* proof
+using the source-equivalent segmented128 controls. It reports success only
+if an entire Stage1→Stage2 proof passes.
+
+For one mode only:
+
+```powershell
+.\scripts\ci\run_trained_with_patched_iree.ps1 -Mode Native
+.\scripts\ci\run_trained_with_patched_iree.ps1 -Mode Segmented
+```
+
+Output is stored beneath `build/trained-patched-iree/native` and
+`build/trained-patched-iree/segmented`; subsequent runs preserve prior
+output under numbered directories. Each run emits one self-contained
+`corridorkey-vulkan-diagnostics.json` report. Both modes use the built
+IREE compiler through an invocation-scoped `PYTHONPATH` and preserve
+the Conda packages; the script verifies the loaded compiler path.
+The trained proof validates the two neural stages only, not the
+foundation networks or a complete video-matting application.
+
+**Do not treat a passing segmented proof as evidence that native GEMM
+or RMS correctness has been repaired.** The reduced source-equivalent
+path and fully native compilation remain separate acceptance cases.
+
+## Upstream patch submission criteria
+
+The first upstream patch should remain surgical: in the static and
+dynamic `SPIRVPipeline::SubgroupReduce` paths, pass the exact
+`subgroupSize` used to specialize the lowering into
+`getSPIRVTranslationInfo`. Do not silently force wave32 on every GPU,
+nor change the reduction arithmetic. The existing patch updates six
+`FileCheck` assertions for subgroup selection at 16, 32 and 64.
+An additional mixed-capability target `subgroup_size_choices = [32,64]`
+regression is desirable for upstream review, especially to prove the
+same case encountered on Radeon 8060S.
+
+Before filing an upstream PR, capture the original v3.13.0 native
+reduction failures, the patched compiler's selected 32 in the dumped
+dispatch metadata, and zero native GPU mismatches including the
+192-channel one-hot map. If native reductions pass but source-trained
+GEMM still fails, investigate the separate matmul/vectorization
+translation paths with the same evidence-first procedure and submit
+a focused follow-up. Never assume that the preferred architecture
+subgroup is universally required for layout-neutral pipelines.
+
+Once a source patch passes on the user's physical GPU, producing a
+versioned `iree-base-compiler` wheel on Windows and Linux is a useful
+way to avoid repetitive local LLVM builds while an upstream release
+is pending. Treat this as a *packaging job*, not a reason to modify
+the original source graph or to pin the project permanently to v3.13.0.
+
