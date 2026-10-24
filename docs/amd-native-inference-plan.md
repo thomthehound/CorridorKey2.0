@@ -473,3 +473,24 @@ loader against a small generated checkpoint and exercise source-derived
 fixtures; hosted runners do not contain the official model weights or
 a physical Radeon 8060S. Do not conflate those CI checks with physical
 GPU execution of trained Stage1.
+
+## Open investigation: AMD Vulkan wide-accumulation correctness
+
+The Stage2 RMSNorm 1280-channel reduction failure and the trained Stage1
+downsample's 8192-term GEMM accumulation failure are now tracked together in
+[AMD Vulkan wide-accumulation correctness investigation](amd-vulkan-wide-accumulation-investigation.md).
+
+Both have reproduced approximately 2× accumulation on the recorded physical
+AMD Vulkan configuration, while mathematically equivalent <=128-element
+segmented reductions agree with the original CPU calculation. The Stage1
+runtime-input GEMM reproduces the failure with the original checkpoint values,
+excluding a captured-constant-only explanation. The first Stage1 mismatch is
+the original /16→/64 downsample; the preceding stem and encoder probes pass.
+
+**Root cause remains open.** IREE lowering, the Vulkan driver compiler, and
+execution/dispatch behavior still require controlled cross-driver testing and
+generated-code inspection. A segmented computation is a numerical correctness
+control, not an upstream fix. The generalized segmented Stage1 export and
+connected two-stage Vulkan proof still require physical-hardware validation.
+Retain the failing native variants as reproducible baselines, along with driver,
+compiler, target, IR/SPIR-V, and performance metadata.
