@@ -2,8 +2,8 @@
 """Differential Vulkan proof for the checkpoint's original Stage1 /16->/64 convolution.
 
 Runs the trained convolution with its actual source encoder activation. Compares
-native Conv2d, compiler-side im2col, and equivalent unfold+matmul, without
-modifying checkpoint parameters or source-model inference.
+native Conv2d, a reduced-kernel Conv2d, and matrix-multiply formulations
+without modifying checkpoint parameters or source-model inference.
 """
 
 from __future__ import annotations
@@ -24,10 +24,16 @@ import torch.nn.functional as F
 class DownsampleVariant(torch.nn.Module):
     def __init__(self, conv: torch.nn.Conv2d, mode: str):
         super().__init__()
-        if mode not in ("native", "im2col", "unfold"):
+        if mode not in ("native", "im2col", "crop4", "gemm4", "spatial", "unfold"):
             raise ValueError(f"Unknown convolution variant: {mode}")
-        if mode == "unfold" and conv.groups != 1:
-            raise ValueError("Unfold variant requires a non-grouped convolution")
+        if mode in ("crop4", "gemm4"):
+            # This exact reduction holds only for one output cell: at 4x4
+            # input, the padded k8/s4 convolution visits only its center taps.
+            if (conv.kernel_size != (8, 8) or conv.stride != (4, 4)
+                    or conv.padding != (2, 2) or conv.dilation != (1, 1)):
+                raise ValueError("4x4 variants require k8/s4/p2/d1")
+        if mode in ("crop4", "gemm4", "spatial", "unfold") and conv.groups != 1:
+            raise ValueError("Matmul variants require groups=1")
         self.conv = conv
         self.mode = mode
 
@@ -35,16 +41,18 @@ class DownsampleVariant(torch.nn.Module):
         if self.mode in ("native", "im2col"):
             return self.conv(x)
         conv = self.conv
-        patches = F.unfold(
-            x, kernel_size=conv.kernel_size, dilation=conv.dilation,
-            padding=conv.padding, stride=conv.stride,
-        )
-        # Original convolution weights and spatial sampling order.
-        values = torch.matmul(
-            patches.transpose(1, 2), conv.weight.flatten(1).transpose(0, 1)
-        )
-        if conv.bias is not None:
-            values = values + conv.bias
+        if self.mode in ("crop4", "gemm4"):
+            if x.shape[-2:] != (4, 4):
+                raise ValueError("crop4/gemm4 are exact only for 4x4 activations")
+            # For k8/s4/p2 and 4x4 input, only taps [2:6,2:6]
+            # overlap the image. These are slices of the trained weights.
+            weight = conv.weight[:, :, 2:6, 2:6]
+            if self.mode == "crop4":
+                return F.conv2d(x, weight, conv.bias, stride=4)
+            output = F.linear(x.reshape(x.shape[0], -1),
+                              weight.reshape(conv.out_channels, -1), conv.bias)
+            return output.reshape(x.shape[0], conv.out_channels, 1, 1)
+
         height = (
             x.shape[-2] + 2 * conv.padding[0]
             - conv.dilation[0] * (conv.kernel_size[0] - 1) - 1
@@ -53,6 +61,38 @@ class DownsampleVariant(torch.nn.Module):
             x.shape[-1] + 2 * conv.padding[1]
             - conv.dilation[1] * (conv.kernel_size[1] - 1) - 1
         ) // conv.stride[1] + 1
+        if self.mode == "unfold":
+            # This native aten.im2col path remains selectable to track IREE
+            # compiler support; it currently fails compilation.
+            patches = F.unfold(
+                x, kernel_size=conv.kernel_size, dilation=conv.dilation,
+                padding=conv.padding, stride=conv.stride,
+            )
+        else:
+            # Explicit padded spatial gathers, not aten.im2col. This
+            # formulation is exact for all supported input resolutions.
+            padded = F.pad(x, (
+                conv.padding[1], conv.padding[1],
+                conv.padding[0], conv.padding[0],
+            ))
+            taps = [
+                padded[:, :, ky * conv.dilation[0]:
+                       ky * conv.dilation[0] + height * conv.stride[0]:
+                       conv.stride[0],
+                       kx * conv.dilation[1]:
+                       kx * conv.dilation[1] + width * conv.stride[1]:
+                       conv.stride[1]]
+                for ky in range(conv.kernel_size[0])
+                for kx in range(conv.kernel_size[1])
+            ]
+            patches = torch.stack(taps, dim=2).permute(
+                0, 3, 4, 1, 2
+            ).reshape(x.shape[0], height * width, -1).transpose(1, 2)
+        values = torch.matmul(
+            patches.transpose(1, 2), conv.weight.flatten(1).transpose(0, 1)
+        )
+        if conv.bias is not None:
+            values = values + conv.bias
         return values.transpose(1, 2).reshape(
             x.shape[0], conv.out_channels, height, width
         )
@@ -232,8 +272,8 @@ def main():
     parser.add_argument("--frames", type=int, default=1)
     parser.add_argument("--target", default="rdna3")
     parser.add_argument(
-        "--modes", default="native,im2col,unfold",
-        help="Comma-separated variants: native,im2col,unfold",
+        "--modes", default="native,crop4,gemm4,spatial",
+        help="Comma-separated variants: native,im2col,crop4,gemm4,spatial,unfold",
     )
     parser.add_argument("--output", type=Path, required=True)
     group = parser.add_mutually_exclusive_group()
@@ -242,9 +282,13 @@ def main():
     args = parser.parse_args()
     args.modes = tuple(part.strip() for part in args.modes.split(","))
     if not args.modes or any(
-        part not in ("native", "im2col", "unfold") for part in args.modes
+        part not in ("native", "im2col", "crop4", "gemm4", "spatial", "unfold")
+        for part in args.modes
     ) or len(set(args.modes)) != len(args.modes):
-        parser.error("--modes must select unique members of native,im2col,unfold")
+        parser.error(
+            "--modes must select unique members of "
+            "native,im2col,crop4,gemm4,spatial,unfold"
+        )
     if args.checkpoint and not args.checkpoint.is_file():
         parser.error(f"Checkpoint not found: {args.checkpoint}")
     if args.frames < 1 or args.height < 1 or args.width < 1 or (
