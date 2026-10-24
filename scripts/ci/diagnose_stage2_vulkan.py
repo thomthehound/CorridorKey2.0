@@ -214,7 +214,12 @@ def run(directory: Path, target: str, *, checkpoint=None,
     }
     try:
         if checkpoint is None:
-            source, rgb, baton, reference = create_stage2()
+            # A ten-block Stage2 starts with FullSpatialBlock2D; the eight-
+            # block fixture starts with Swin. Match the production block
+            # family for the focused probes without changing default tests.
+            source, rgb, baton, reference = create_stage2(
+                num_blocks=10 if first_block else 8
+            )
             reference_output = (reference.transpose(0, 1, 3, 4, 2).copy(),)
             sites = (first_block_sites(source.stage2, rgb)
                      if first_block else SYNTHETIC_SITES)

@@ -54,7 +54,7 @@ def _output_arrays(output):
     return tuple(t.detach().cpu().numpy() for t in outputs)
 
 
-def create_stage2():
+def create_stage2(*, num_blocks=8):
     from corridorkey.stage2 import Stage2
 
     torch.manual_seed(1937)
@@ -62,7 +62,7 @@ def create_stage2():
         d=48,
         d_baton=16,
         num_heads=4,
-        num_blocks=8,
+        num_blocks=num_blocks,
         num_final_blocks=2,
         window_size=4,
         mlp_mult=2.0,
