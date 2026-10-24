@@ -323,6 +323,8 @@ def run(args):
     import iree.runtime as rt
     if args.one_hot and not args.execute_vulkan:
         raise ValueError("--one-hot requires --execute-vulkan")
+    if args.require_subgroup_size and not args.dump_executables:
+        raise ValueError("--require-subgroup-size needs --dump-executables")
     if args.record_subgroups:
         report["vulkan_properties"] = collect_vulkan_properties(args.output)
     if args.execute_vulkan:
@@ -386,6 +388,16 @@ def run(args):
                         case["codegen_subgroup_metadata"] = (
                             collect_executable_subgroup_metadata(dump)
                         )
+                        if args.require_subgroup_size:
+                            chosen = case["codegen_subgroup_metadata"][
+                                "selected_subgroup_sizes_in_ir"
+                            ]
+                            if chosen != [args.require_subgroup_size]:
+                                raise AssertionError(
+                                    f"{name}: expected explicit subgroup size "
+                                    f"{args.require_subgroup_size}, got {chosen}; "
+                                    "compiler output is not proven wave32"
+                                )
                     if not args.execute_vulkan:
                         print(f"[reduction sweep] {name}: compiled", flush=True)
                         continue
@@ -478,6 +490,9 @@ def main():
                              "with identical runtime reduction shapes")
     parser.add_argument("--record-subgroups", action="store_true",
                         help="Capture vulkaninfo device/subgroup properties")
+    parser.add_argument("--require-subgroup-size", type=int, choices=(32, 64),
+                        help="Require explicit subgroup-size selection in "
+                             "emitted IREE IR; needs --dump-executables")
     parser.add_argument("--inspect-only", action="store_true",
                         help="Inspect previously dumped executables without "
                              "recompiling or executing any GPU kernels")
