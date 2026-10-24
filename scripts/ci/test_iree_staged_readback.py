@@ -148,7 +148,7 @@ class StagedReadbackTests(unittest.TestCase):
 
         def to_host():
             counts[0] += 1
-            raise ValueError(
+            raise RuntimeError(
                 "host allocation import pointer does not satisfy Vulkan "
                 "minImportedHostPointerAlignment 4096"
             )
