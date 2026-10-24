@@ -32,6 +32,13 @@ class _FakeStaging:
     def map(self):
         return self
     def asarray(self, shape, dtype):
+        # Mirror IREE 3.13's numpy::SimpleNewFromData:
+        # dtype_descr.itemsize must be a concrete integer, not the
+        # descriptor belonging to the np.float32 scalar class.
+        if not isinstance(dtype, np.dtype):
+            raise TypeError('Expected a NumPy dtype descriptor')
+        if not isinstance(dtype.itemsize, int):
+            raise TypeError('Invalid dtype descriptor itemsize')
         return self.data.view(dtype).reshape(shape)
 
 
