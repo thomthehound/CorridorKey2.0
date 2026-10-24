@@ -1,6 +1,6 @@
 # AMD Vulkan wide-accumulation correctness investigation
 
-**Status:** Reproduced on physical AMD Vulkan; underlying compiler/driver/runtime fault not yet attributed. Driver A/B comparison pending. Segmented source-equivalent lowerings are correctness candidates, not root-cause fixes.
+**Status:** Reproduced on physical AMD Vulkan; underlying compiler/driver/runtime fault not yet attributed. A replacement AMD Vulkan driver reproduced the same Stage1 failure and segmented success on October 24, 2026 (replacement version not yet recorded). Segmented source-equivalent lowerings are correctness candidates, not root-cause fixes.
 
 **Scope:** CorridorKey 2.0 Stage2 RMSNorm reductions and Stage1 trained downsample convolution/GEMM, imported with Torch Export / IREE Turbine and compiled through IREE's Vulkan SPIR-V backend. The exported computation retains checkpoint parameters and source arithmetic. DXC is not part of this direct SPIR-V compilation path.
 
@@ -9,6 +9,8 @@
 The previously recorded physical-GPU environment for the Stage2 investigation was Radeon 8060S, AMD proprietary Vulkan LLPC 26.8.1, IREE compiler/runtime 3.13.0. The exact driver, IREE, PyTorch, and Turbine versions used for each subsequent Stage1 reproduction must be recorded independently rather than inferred from this baseline. Both `rdna1` and `rdna3` IREE targets exhibited the Stage2 issue on the same physical device.
 
 A driver A/B test should keep the same repository revision, original checkpoint, Python/importer/compiler/runtime versions, inputs, target, optimization flags, and GPU. Record both Vulkan device/driver identities with `vulkaninfo --summary` (or the equivalent device report), alongside the IREE package versions. Run both comparisons without changing graph legalization between driver installations. Preserve each run's `report.json`, CPU arrays, Vulkan arrays, and available compiler artifacts in distinct output directories.
+
+The first reported replacement-driver run did not change the tested Stage1 values: both `gemm4` and `gemm4runtime` still fit an accumulation scale of `2`, with 511/512 CPU mismatches, while `seg128` still matches CPU at all 512 elements and a maximum absolute error of `7.87e-6`. This is evidence against that particular driver update fixing the fault, not evidence that all AMD driver versions behave identically.
 
 A driver-dependent result localizes the problem toward driver-sensitive code generation or execution, but does not by itself prove a driver bug: IREE may generate target-dependent code whose behavior varies with the device capabilities reported by the driver. A driver-independent result also does not exonerate IREE.
 
