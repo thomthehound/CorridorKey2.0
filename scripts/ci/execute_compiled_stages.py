@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
-from iree_staged_readback import staged_readback
+from iree_staged_readback import VulkanReadback
 
 
 def load_array(path: Path) -> np.ndarray:
@@ -52,14 +52,6 @@ def compare(actual, expected, label, atol=3e-3, rtol=3e-3):
     return report
 
 
-def readback(value, device, runtime) -> np.ndarray:
-    """Read device-local Vulkan data via HAL-managed staging memory."""
-    result = staged_readback(value, device, runtime)
-    if result.dtype != np.float32 or not np.isfinite(result).all():
-        raise ValueError("Nonfinite or non-float32 Vulkan result")
-    return result
-
-
 def load_vmfb(config, path: Path):
     import iree.runtime as rt
 
@@ -86,7 +78,7 @@ def execute(args):
         "runs": args.runs,
         "warmup": args.warmup,
         "torch_runtime": False,
-        "interstage_transfer": "Vulkan HAL staging readback -> CPU NHWC/NCHW -> upload",
+        "interstage_transfer": "Vulkan readback -> CPU NHWC/NCHW -> upload",
         "success": False,
     }
     try:
@@ -115,6 +107,7 @@ def execute(args):
         device_inputs = tuple(
             rt.asdevicearray(config.device, value) for value in data
         )
+        reader = VulkanReadback(config.device, rt)
         report["input_upload_bytes"] = sum(x.nbytes for x in data)
 
         def run_once():
@@ -125,8 +118,8 @@ def execute(args):
                     f"Stage1 returned {len(stage1_output)} outputs, expected "
                     "baton, aux and optional bottleneck"
                 )
-            baton_nhwc = readback(stage1_output[0], config.device, rt)
-            aux_nhwc = readback(stage1_output[1], config.device, rt)
+            baton_nhwc = reader.read(stage1_output[0])
+            aux_nhwc = reader.read(stage1_output[1])
             if baton_nhwc.shape[:2] != (batch, frames) or (
                 baton_nhwc.shape[2:4] != (height // 16, width // 16)
             ):
@@ -142,7 +135,7 @@ def execute(args):
             if len(stage2_output) not in (1, 2):
                 raise AssertionError("Stage2 output count differs from source")
             final_outputs = tuple(
-                readback(o, config.device, rt).transpose(0, 1, 4, 2, 3).copy()
+                reader.read(o).transpose(0, 1, 4, 2, 3).copy()
                 for o in stage2_output
             )
             for final in final_outputs:
@@ -162,6 +155,7 @@ def execute(args):
                 "stage1_stage2_total_ms": total_ms,
             })
         report["latencies_ms"] = elapsed
+        report["readback_backend"] = reader.strategy
         report["wall_clock_total_median_ms"] = float(np.median([
             x["stage1_stage2_total_ms"] for x in elapsed
         ]))
@@ -174,6 +168,9 @@ def execute(args):
         report["stage1_aux_readback_bytes"] = aux.nbytes
         # These timings include device execution, synchronization, array
         # readbacks and host staging; they are not GPU kernel timings.
+        # The first iteration may switch from native runtime readback to
+        # HAL staging if the installed IREE runtime mishandles Vulkan
+        # host-import alignment. The adapter caches staging allocations.
 
         np.save(args.output / "stage1_baton.npy", baton)
         np.save(args.output / "stage1_aux.npy",
