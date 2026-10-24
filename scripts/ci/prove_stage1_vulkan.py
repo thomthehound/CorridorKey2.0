@@ -123,13 +123,16 @@ def create_stage1():
 
 
 def export_stage1(model, args, *, rms_reduction="native",
-                  down_reduction="native", fuse_reduction="native"):
+                  down_reduction="native", fuse_reduction="native",
+                  linear_reduction="native"):
     if rms_reduction not in ("native", "segmented128"):
         raise ValueError(f"Unsupported Stage1 RMSNorm lowering: {rms_reduction}")
     if down_reduction not in ("native", "segmented128"):
         raise ValueError(f"Unsupported Stage1 downsample lowering: {down_reduction}")
     if fuse_reduction not in ("native", "segmented128"):
         raise ValueError(f"Unsupported Stage1 fusion lowering: {fuse_reduction}")
+    if linear_reduction not in ("native", "segmented128"):
+        raise ValueError(f"Unsupported Stage1 linear lowering: {linear_reduction}")
     import corridorkey.blocks as blocks
 
     # Evaluate the source's static shifted-region cache on CPU for this
@@ -165,6 +168,7 @@ def export_stage1(model, args, *, rms_reduction="native",
         authoritative = tuple(t.detach().numpy().copy() for t in model(*args))
     saved_down = None
     saved_fuse = []
+    saved_linears = []
     saved_norm = []
     blocks._shifted_region_groups_3d_cached = fixed
     try:
@@ -179,6 +183,9 @@ def export_stage1(model, args, *, rms_reduction="native",
         if fuse_reduction == "segmented128":
             from stage1_linear_lowering import wrap_fusion_projections
             saved_fuse = wrap_fusion_projections(model.source.fuse)
+        if linear_reduction == "segmented128":
+            from stage1_linear_lowering import wrap_wide_stage1_linears
+            saved_linears = wrap_wide_stage1_linears(model.source)
 
         for _, module in list(model.named_modules()):
             for name, child in list(module.named_children()):
@@ -192,7 +199,8 @@ def export_stage1(model, args, *, rms_reduction="native",
             flattened = tuple(t.detach().numpy() for t in model(*args))
         tolerance = (
             2e-5 if down_reduction == "segmented128"
-            or fuse_reduction == "segmented128" else 1e-6
+            or fuse_reduction == "segmented128"
+            or linear_reduction == "segmented128" else 1e-6
         )
         for index, (reference, actual) in enumerate(zip(authoritative, flattened)):
             np.testing.assert_allclose(
@@ -203,6 +211,9 @@ def export_stage1(model, args, *, rms_reduction="native",
     finally:
         for parent, name, original_norm in saved_norm:
             setattr(parent, name, original_norm)
+        if saved_linears:
+            from stage1_linear_lowering import restore_source_linears
+            restore_source_linears(saved_linears)
         for name, original_linear in saved_fuse:
             setattr(model.source.fuse, name, original_linear)
         if saved_down is not None:
