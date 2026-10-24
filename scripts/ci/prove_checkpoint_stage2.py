@@ -164,6 +164,7 @@ def self_test():
             checkpoint=checkpoint, output=Path(tmp) / "cpu-only",
             height=32, width=32, compile=False,
             execute_vulkan=False, target="rdna1", rms_reduction="native",
+            rgb_input=None, baton_input=None,
         )
         if run(cpu_args) != 0:
             raise AssertionError("CPU-only checkpoint inference failed")
@@ -208,8 +209,33 @@ def run(args) -> int:
         report["stage2_blocks"] = config["n_blocks_stage2"]
 
         height, width = args.height, args.width
-        rgb = torch.randn(1, 1, 3, height, width)
-        baton = torch.randn(1, 1, config["d_16"], height // 16, width // 16)
+        if args.rgb_input is not None:
+            rgb_array = np.load(args.rgb_input, allow_pickle=False)
+            baton_array = np.load(args.baton_input, allow_pickle=False)
+            if (
+                rgb_array.shape != (1, 1, 3, height, width)
+                or baton_array.shape != (
+                    1, 1, config["d_16"], height // 16, width // 16
+                )
+                or rgb_array.dtype != np.float32
+                or baton_array.dtype != np.float32
+                or not np.isfinite(rgb_array).all()
+                or not np.isfinite(baton_array).all()
+            ):
+                raise ValueError(
+                    "External Stage1->Stage2 input ABI differs from checkpoint"
+                )
+            rgb = torch.from_numpy(np.ascontiguousarray(rgb_array))
+            baton = torch.from_numpy(np.ascontiguousarray(baton_array))
+            report["source_input"] = "external Stage1 baton and RGB"
+        else:
+            rgb = torch.randn(1, 1, 3, height, width)
+            baton = torch.randn(
+                1, 1, config["d_16"], height // 16, width // 16
+            )
+            report["source_input"] = "deterministic random reference fixture"
+        np.save(args.output / "input_rgb.npy", rgb.numpy())
+        np.save(args.output / "input_baton.npy", baton.numpy())
         with torch.inference_mode():
             source = _as_arrays(stage2(rgb, baton))
         for index, value in enumerate(source):
@@ -321,6 +347,14 @@ def main() -> int:
     parser.add_argument("--width", type=int, default=64)
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--execute-vulkan", action="store_true")
+    parser.add_argument(
+        "--rgb-input", type=Path,
+        help="Use the Stage1 proof's input_0.npy RGB in place of random RGB",
+    )
+    parser.add_argument(
+        "--baton-input", type=Path,
+        help="Use the Stage1 proof's source_0.npy baton as the Stage2 input",
+    )
     parser.add_argument("--target", default="rdna1")
     parser.add_argument(
         "--rms-reduction", choices=("native", "segmented128"),
@@ -342,6 +376,11 @@ def main() -> int:
         parser.error("--height and --width must be positive multiples of 16")
     if args.execute_vulkan and not args.compile:
         parser.error("--execute-vulkan requires --compile")
+    if (args.rgb_input is None) != (args.baton_input is None):
+        parser.error("--rgb-input and --baton-input must be specified together")
+    for source_path in (args.rgb_input, args.baton_input):
+        if source_path is not None and not source_path.is_file():
+            parser.error(f"Input file does not exist: {source_path}")
     return run(args)
 
 
