@@ -2,9 +2,10 @@
 """Isolate the original Stage2 first-block RMSNorm for IREE Vulkan validation.
 
 Run the exact learned first-block normalization and its actual CPU input when
---checkpoint is given. Separately test a nontrivial 1280-channel source module
-without needing pretrained weights. Both native-rank and 2D token-major views
-preserve the same source RMSNorm and learned affine weights.
+--checkpoint is given. Compare native-rank, flattened token-major, and
+reassociated 256-channel reduction implementations with unchanged source
+weights. Emit independently compiled intermediate arithmetic results to
+identify incorrect Vulkan lowering without relaxing numerical tolerances.
 """
 
 from __future__ import annotations
@@ -32,6 +33,35 @@ class FlatRMSNorm(torch.nn.Module):
 
     def forward(self, x):
         return self.source(x.reshape(-1, x.shape[-1])).reshape(x.shape)
+
+
+class ChunkedRMSNorm(torch.nn.Module):
+    """Reassociate only the square-sum reduction, retaining source weights.
+
+    Splitting the reduction into contiguous 256-channel groups preserves
+    RMSNorm's normalization domain and learned affine transform. This probes
+    whether Vulkan errors are specific to a wide 1280-element reduction.
+    """
+
+    def __init__(self, source):
+        super().__init__()
+        self.source = source
+
+    def forward(self, x):
+        channel_count = x.shape[-1]
+        if channel_count % 256:
+            raise ValueError("Chunked RMSNorm expects 256-aligned channel count")
+        accumulation = x.float() if x.dtype in (
+            torch.float16, torch.bfloat16
+        ) else x
+        square = accumulation.square().reshape(
+            *x.shape[:-1], channel_count // 256, 256
+        )
+        variance = square.sum(dim=-1).sum(dim=-1, keepdim=True) / channel_count
+        normalized = (accumulation * torch.rsqrt(
+            variance + self.source.eps
+        )).to(x.dtype)
+        return normalized * self.source.weight.to(x.dtype)
 
 
 
@@ -213,6 +243,7 @@ def run(args):
         for kind, variant in (
             ("native_rank", module),
             ("flat_tokens", FlatRMSNorm(module)),
+            ("chunked_256", ChunkedRMSNorm(module)),
         ):
             entry = {"kind": kind, "compile": False, "numerical_match": None}
             report["cases"].append(entry)
