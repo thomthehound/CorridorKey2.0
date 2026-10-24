@@ -328,3 +328,10 @@ the 16 mean-square CPU and Vulkan scalar values and their ratio; a consistent
 ratio can expose a faulty padded divisor. No alternate method becomes the
 Stage2 export lowering until the trained GPU gate is passed and the performance
 trade-off is measured.
+
+On the current IREE llvmpipe compiler, the optional seven-output term tracing
+graph fails codegen when lowering a vector constant, independently of the
+standalone RMSNorm operation. CI exercises the uninstrumented native, flattened,
+and chunked source-equivalent normalization proofs with `--no-trace-terms` on
+Linux, while keeping full term tracing enabled by default for hardware-local
+reproduction where it compiles. Neither behavior relaxes the numerical gates.

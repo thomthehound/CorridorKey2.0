@@ -308,14 +308,20 @@ def run(args):
 
         import iree.turbine.aot as aot
 
-        try:
-            report["terms"] = run_terms(module, sample, reference, args)
-        except Exception as exc:
+        if args.trace_terms:
+            try:
+                report["terms"] = run_terms(module, sample, reference, args)
+            except Exception as exc:
+                report["terms"] = {
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "traceback": traceback.format_exc(),
+                }
+                print(report["terms"]["traceback"], file=sys.stderr, flush=True)
+        else:
             report["terms"] = {
-                "error": f"{type(exc).__name__}: {exc}",
-                "traceback": traceback.format_exc(),
+                "skipped": True,
+                "reason": "instrumented term graph disabled for this run",
             }
-            print(report["terms"]["traceback"], file=sys.stderr, flush=True)
 
         variants = [
             ("native_rank", module, "O2"),
@@ -427,6 +433,12 @@ def main():
     parser.add_argument("--width", type=int, default=64)
     parser.add_argument("--target", default="rdna1")
     parser.add_argument("--execute-vulkan", action="store_true")
+    parser.add_argument(
+        "--no-trace-terms", dest="trace_terms", action="store_false",
+        help="Run source normalization variants without the optional "
+             "seven-output RMSNorm arithmetic instrumentation",
+    )
+    parser.set_defaults(trace_terms=True)
     parser.add_argument(
         "--explore-reductions", action="store_true",
         help="Also compile source-equivalent matmul and padded reductions, "

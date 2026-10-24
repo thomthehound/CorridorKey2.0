@@ -125,7 +125,7 @@ jobs:
         shell: bash
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
-            python scripts/ci/prove_checkpoint_rmsnorm.py --output build/rmsnorm-proof --target llvmpipe --execute-vulkan
+            python scripts/ci/prove_checkpoint_rmsnorm.py --output build/rmsnorm-proof --target llvmpipe --execute-vulkan --no-trace-terms
           else
             python scripts/ci/prove_checkpoint_rmsnorm.py --output build/rmsnorm-proof --target rdna1
           fi
