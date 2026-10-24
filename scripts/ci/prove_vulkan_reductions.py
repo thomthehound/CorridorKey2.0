@@ -165,7 +165,7 @@ def collect_executable_subgroup_metadata(directory: Path):
     sizes = set()
     for path in sorted(directory.rglob("*.mlir")):
         content = path.read_text(encoding="utf-8", errors="replace")
-        for match in re.finditer(r"(?<![\\w])subgroup_size\\s*=\\s*(\\d+)", content):
+        for match in re.finditer(r"(?<!\w)subgroup_size\s*=\s*(\d+)", content):
             sizes.add(int(match.group(1)))
         for line_no, line in enumerate(content.splitlines(), start=1):
             if ("subgroup_size" in line
