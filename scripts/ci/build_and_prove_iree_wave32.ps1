@@ -48,6 +48,31 @@ function Require-Command {
     }
 }
 
+function Initialize-CondaPython3 {
+    param([Parameter(Mandatory = $true)][string]$Directory)
+    # IREE 3.13 custom commands invoke literal python3, independent of
+    # Python3_EXECUTABLE. Windows Store execution aliases are not reliable.
+    # Use a process-local cmd shim before WindowsApps in PATH.
+    $python = (Get-Command python -ErrorAction Stop).Source
+    if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+        throw "Conda Python executable not found: $python"
+    }
+    $shimDir = Join-Path $Directory "corridorkey-python-shim"
+    New-Item -ItemType Directory -Force -Path $shimDir | Out-Null
+    $shim = Join-Path $shimDir "python3.cmd"
+    $contents = "@echo off`r`n`"$python`" %*`r`n"
+    [IO.File]::WriteAllText($shim, $contents, [Text.Encoding]::ASCII)
+    $env:PATH = $shimDir + [IO.Path]::PathSeparator + $env:PATH
+    $resolved = @(& where.exe python3)
+    if ($LASTEXITCODE -ne 0 -or $resolved.Count -eq 0 -or
+        -not [string]::Equals($resolved[0].Trim(), $shim,
+                             [StringComparison]::OrdinalIgnoreCase)) {
+        throw "python3 does not resolve to the Conda shim: $($resolved -join ', ')"
+    }
+    Write-Host "[wave32] python3 resolves to Conda Python through $shim"
+    Invoke-Checked "cmd.exe" @("/d", "/c", "python3 --version")
+}
+
 function Initialize-Msvc {
     if (Get-Command cl.exe -ErrorAction SilentlyContinue) { return }
     $installer = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
@@ -87,6 +112,7 @@ $OutputDir = [IO.Path]::GetFullPath($OutputDir)
 $patch = Join-Path $repoRoot "patches\iree\3.13.0-require-subgroup-size.patch"
 $proof = Join-Path $repoRoot "scripts\ci\prove_vulkan_reductions.py"
 $originalPythonPath = $env:PYTHONPATH
+$originalPath = $env:PATH
 
 if (-not (Test-Path -LiteralPath $patch -PathType Leaf)) {
     throw "CorridorKey's IREE patch is missing: $patch"
@@ -166,6 +192,9 @@ try {
             "-C", $SourceDir, "submodule", "update", "--init", "--recursive",
             "--depth", "1"
         )
+        # Python3_EXECUTABLE does not fix generated Ninja commands
+        # hard-coding python3. Prepend the Conda command shim for this run.
+        Initialize-CondaPython3 -Directory $BuildDir
         $python = (Get-Command python -ErrorAction Stop).Source
         Invoke-Checked "cmake" @(
             "-S", $SourceDir, "-B", $BuildDir, "-G", "Ninja",
@@ -275,4 +304,5 @@ print("[wave32] Native reduction correctness proof passed")
     Write-Host "[wave32] Report: $reportPath"
 } finally {
     $env:PYTHONPATH = $originalPythonPath
+    $env:PATH = $originalPath
 }
