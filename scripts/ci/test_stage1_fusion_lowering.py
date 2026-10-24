@@ -14,6 +14,7 @@ import torch.nn as nn
 from corridorkey.blocks import FusionLinSwiglu
 from stage1_linear_lowering import (
     FUSION_PROJECTIONS, SegmentedSourceLinear, wrap_fusion_projections,
+    wrap_wide_stage1_linears, restore_source_linears,
 )
 
 
@@ -57,6 +58,73 @@ def check_source_fusion():
     torch.testing.assert_close(restored, reference, atol=0, rtol=0)
 
 
+def check_nested_wide_linears():
+    class NestedSource(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.fuse = nn.Module()
+            self.fuse.w_gate = nn.Linear(1536, 16)
+            self.body_64 = nn.ModuleList([nn.Module()])
+            self.body_64[0].attn = nn.Module()
+            self.body_64[0].attn.qkv = nn.Module()
+            self.body_64[0].attn.qkv.qkv = nn.Linear(1536, 4608)
+            self.body_64[0].attn.attn_gate = nn.Module()
+            self.body_64[0].attn.attn_gate.proj = nn.Linear(
+                1536, 16, bias=False
+            )
+            self.body_64[0].attn.proj = nn.Linear(1536, 1536)
+            self.body_64[0].small = nn.Linear(64, 64)
+
+        def forward(self, x):
+            attn = self.body_64[0].attn
+            return (attn.qkv.qkv(x),
+                    attn.attn_gate.proj(x),
+                    attn.proj(x))
+
+    source = NestedSource().eval()
+    x = torch.randn(1, 1, 1, 1, 1536)
+    saved_parameters = {
+        name: param for name, param in source.named_parameters()
+    }
+    original_fuse = source.fuse.w_gate
+    original_small = source.body_64[0].small
+    original_modules = {
+        name: module for name, module in source.named_modules()
+        if type(module) is nn.Linear
+    }
+    with torch.inference_mode():
+        expected = source(x)
+
+    wrapped = wrap_wide_stage1_linears(source)
+    try:
+        assert len(wrapped) == 3, len(wrapped)
+        assert source.fuse.w_gate is original_fuse
+        assert source.body_64[0].small is original_small
+        assert isinstance(source.body_64[0].attn.qkv.qkv, SegmentedSourceLinear)
+        with torch.inference_mode():
+            actual = source(x)
+            exported = torch.export.export(source, (x,), strict=True)
+            exported_values = exported.module()(x)
+        for reference, result, cpu_export in zip(expected, actual, exported_values):
+            torch.testing.assert_close(
+                result, reference, atol=2e-5, rtol=2e-5
+            )
+            torch.testing.assert_close(
+                cpu_export, reference, atol=2e-5, rtol=2e-5
+            )
+    finally:
+        restore_source_linears(wrapped)
+
+    for name, original in original_modules.items():
+        assert dict(source.named_modules())[name] is original
+    for name, param in saved_parameters.items():
+        assert dict(source.named_parameters())[name] is param
+    with torch.inference_mode():
+        restored = source(x)
+    for reference, value in zip(expected, restored):
+        torch.testing.assert_close(value, reference, atol=0, rtol=0)
+
+
 def main():
     torch.manual_seed(20261024)
     torch.set_num_threads(min(torch.get_num_threads(), 4))
@@ -68,6 +136,9 @@ def main():
         print(f"[Stage1 fusion] linear {width}->{outputs}: CPU/export passed",
               flush=True)
     check_source_fusion()
+    check_nested_wide_linears()
+    print("[Stage1 fusion] nested wide linears and source restoration passed",
+          flush=True)
     print("[Stage1 fusion] source block and parameter restoration passed",
           flush=True)
 
